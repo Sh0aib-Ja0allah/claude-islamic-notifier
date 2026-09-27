@@ -155,10 +155,11 @@ EOF
 }
 
 # shim NAME [RC [STDOUT]]: a fake program that prints STDOUT and exits RC (default 0).
-# Change them later with shim_rc and shim_out.
+# Change them later with shim_rc and shim_out; shim_err gives it something for stderr.
 shim() {
   shim_write "$1" <<'EOF'
 [ -f "$sb/cfg/$n.out" ] && cat "$sb/cfg/$n.out"
+[ -f "$sb/cfg/$n.err" ] && cat "$sb/cfg/$n.err" >&2
 rc=0
 [ -f "$sb/cfg/$n.rc" ] && read -r rc < "$sb/cfg/$n.rc"
 exit "$rc"
@@ -168,6 +169,7 @@ EOF
 }
 shim_rc() { printf '%s\n' "$2" > "$SB/cfg/$1.rc"; }
 shim_out() { printf '%s\n' "$2" > "$SB/cfg/$1.out"; }
+shim_err() { printf '%s\n' "$2" > "$SB/cfg/$1.err"; }
 
 # shim_path NAME: a fake cygpath or wslpath. "-w P" prints C: then P with / turned into \.
 # "-u P" prints $SB/cfg/NAME.u if it exists, else fails.
