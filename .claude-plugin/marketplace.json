@@ -1,0 +1,14 @@
+{
+  "name": "islamic-notifier",
+  "owner": { "name": "Sh0aib-Ja0allah" },
+  "description": "Islamic adhkar notifier for Claude Code",
+  "plugins": [
+    {
+      "name": "islamic-notifier",
+      "source": "./plugins/islamic-notifier",
+      "description": "Plays a random dhikr when Claude finishes responding",
+      "category": "productivity",
+      "tags": ["notification", "audio", "islamic", "adhkar"]
+    }
+  ]
+}

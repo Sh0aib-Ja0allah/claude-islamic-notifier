@@ -1,0 +1,11 @@
+{
+  "name": "islamic-notifier",
+  "displayName": "Islamic Notifier (Adhkar)",
+  "version": "0.1.0",
+  "description": "Plays a random dhikr (SubhanAllah, Alhamdulillah, ...) when Claude finishes a task",
+  "author": { "name": "Sh0aib-Ja0allah" },
+  "homepage": "https://github.com/Sh0aib-Ja0allah/claude-islamic-notifier",
+  "repository": "https://github.com/Sh0aib-Ja0allah/claude-islamic-notifier",
+  "license": "MIT",
+  "keywords": ["adhkar", "dhikr", "islamic", "notification", "sound"]
+}

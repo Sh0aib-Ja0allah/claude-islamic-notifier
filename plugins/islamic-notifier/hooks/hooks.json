@@ -1,0 +1,16 @@
+{
+  "description": "islamic-notifier: play a random dhikr when Claude finishes responding",
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo `# <#` >/dev/null; exec 3<&0; sh \"${CLAUDE_PLUGIN_ROOT}/scripts/notify.sh\" --hook <&3 >/dev/null 2>&1 & exit 0 #> > $null; & \"${CLAUDE_PLUGIN_ROOT}/scripts/play.ps1\" -Hook; exit 0",
+            "async": true
+          }
+        ]
+      }
+    ]
+  }
+}
