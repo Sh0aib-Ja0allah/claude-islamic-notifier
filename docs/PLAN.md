@@ -14,8 +14,8 @@
   - VS Code: `/plugins`, then **Marketplaces**, then add the same repo.
 - **Seven slash commands**, `/islamic-notifier:…`: `test`, `mute`, `unmute`, `volume`, `pauses`, `sounds`, `status`.
 - **Settings** are stored in `~/.claude/plugins/data/<id>/config`. **Custom clips** go in `~/.claude/islamic-notifier/sounds/`.
-- **Bundled audio** is six normalized 16-bit mono WAVs under their own license (CC BY 4.0 or CC0). The best source is the author's own recordings, or a volunteer's under a written release (§7).
-- **Still to decide:** §13 (owner, voice, audio license, and more).
+- **Bundled audio** is six normalized 16-bit mono WAVs. Per §0, they come from freely licensed web recordings (CC0 or CC BY, stated on the clip's own page), with a labelled paid-tier TTS voice for any gap. Each clip keeps its source's license, recorded in `CREDITS.md` (§13 #4).
+- **Still to decide:** §13 #3, #6 and #8–#12 (voice variants, TTS vendor and billing, masters in git, reviewers, defaults, output language, and the Git Bash fallback).
 
 ## 0. Background and fixed decisions
 
@@ -269,7 +269,7 @@ claude-islamic-notifier/
 
 **Rules for both script halves:**
 
-- Every path variable stays double-quoted, which keeps `claude plugin validate --strict` quiet.
+- Every path variable stays double-quoted, so a path with spaces stays one argument. `claude plugin validate --strict` on 2.1.261 does not flag an unquoted variable, so the validator does not enforce this rule.
 - Both halves end with `exit 0`.
 - No `timeout` field, because it has no effect on async hooks.
 
@@ -475,7 +475,9 @@ The reviewer is an open item (§13). `docs/recording-guide.md` (M5) gives volunt
 
 ### 7.3 Recommended sources, best first
 
-1. **The author's own voice, or a consenting volunteer or local imam (recommended).**
+§0 (2026-09-28) overrides the ranking below: freely licensed web recordings (CC0 or CC BY) come first and a labelled paid-tier TTS voice fills the gaps; the researched candidates are in `docs/audio-sources.md`.
+
+1. **The author's own voice, or a consenting volunteer or local imam.**
    - Needs a short written release that grants CC0 or CC BY 4.0 and allows public distribution.
    - A phone voice memo in a quiet room is enough: 3–5 takes per phrase, calm and moderate pace, no reverb, no music.
 2. **Paid-tier commercial TTS, as an interim or alternative pack.**
@@ -492,7 +494,7 @@ The reviewer is an open item (§13). `docs/recording-guide.md` (M5) gives volunt
 3. **CC stopgap clips (partial only).**
    - **Wikimedia Commons / Lingua Libre:** "Allahu Akbar" (CC0, 1.25 s) and "الحمد لله" (CC BY-SA 4.0, South Levantine). That covers 2 of 6 phrases, from different speakers.
    - **Freesound:** a CC0 "Allahu Akbar" field recording from Morocco, 11 s and not clean.
-   - Open each file page to verify its license before use. **Using these at all is an open item.**
+   - Open each file page to verify its license before use. **Decided (§13 #7): these are the starting point, more sources are searched for the other phrases, and each CC BY-SA clip needs the author's OK per file.**
 4. **Users' own audio.**
    - Anyone may put recordings they have rights to into the custom folder, including favourite reciters for personal use.
    - The repo never redistributes these.
