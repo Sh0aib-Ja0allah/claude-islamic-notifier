@@ -39,6 +39,7 @@
 | Background pauses | **Play by default.** Claude also "stops" while it waits for background work. A new slash command, `/islamic-notifier:pauses off|on`, lets users skip or restore these pause chimes whenever they want. |
 | v1 scope | Playback, **slash commands**, and a **custom sounds folder**. Showing text and quiet hours are out of scope. |
 | Audio | The author wants **licensed sources recommended** (§7). The author may also supply recordings. |
+| Audio source (2026-09-28) | **Recorded voices from the web, but only freely licensed clips** (CC0 or CC BY; the clip's page must say so). Phrases with no licensed clip yet get a **temporary synthetic (paid-tier TTS) voice, labelled as such**, until a licensed recording is found. |
 | Name and distribution | The plugin is `islamic-notifier`, published from a **public GitHub repo that is also its marketplace**. |
 
 ## 1. Goals and non-goals
@@ -700,12 +701,12 @@ Each item has a recommended default and the milestone it is needed by.
 | # | Decision | Recommended default | Needed by |
 |---|---|---|---|
 | 1 | GitHub owner/account and `author` name | **Decided:** `Sh0aib-Ja0allah` (repo: https://github.com/Sh0aib-Ja0allah/claude-islamic-notifier) | M1 |
-| 2 | Voice: yours, a volunteer or imam, or TTS placeholder | your own voice | M5 |
+| 2 | Voice: yours, a volunteer or imam, or TTS placeholder | **Decided:** freely licensed web recordings (CC0 / CC BY); labelled TTS fills gaps (§0) | M5 |
 | 3 | Voice gender or variants (e.g. `subhanallah.female.wav`) | one voice for v0.1 | M5 |
-| 4 | Audio license | CC0 (simplest to reuse) or CC BY 4.0 (credits the voice) | M5 |
-| 5 | Credit the voice by name, or anonymously | your choice | M5 |
+| 4 | Audio license | **Follows from #2:** each clip keeps its source license (per-file in `CREDITS.md`); TTS placeholders CC0 | M5 |
+| 5 | Credit the voice by name, or anonymously | **Follows from #2:** credit each source as its license requires (CC BY needs name, link, license) | M5 |
 | 6 | If TTS: which vendor and whose billing account | Azure S0 or Google ar-XA | M5 |
-| 7 | Use the CC stopgap clips (2 of 6) | no | M5 |
+| 7 | Use the CC stopgap clips (2 of 6) | **Decided:** yes, they are the starting point; search more sources for the other 4. CC BY-SA clips need the author's OK per file | M5 |
 | 8 | Commit raw masters to the repo | no (git-ignored) | M5 |
 | 9 | Who checks pronunciation, and who reviews the etiquette wording | a native speaker / a trusted local scholar | M5 / M7 |
 | 10 | Default volume 70, `pauses` on, `sounds_mode` both | keep | M4 |
