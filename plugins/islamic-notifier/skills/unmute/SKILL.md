@@ -5,6 +5,7 @@ argument-hint: ""
 allowed-tools:
   - Bash(sh "${CLAUDE_PLUGIN_ROOT}/scripts/ctl.sh" *)
   - PowerShell(& "${CLAUDE_PLUGIN_ROOT}/scripts/ctl.ps1" *)
+  - PowerShell(& "${CLAUDE_PLUGIN_ROOT}/scripts/ctl.ps1" -Data "${CLAUDE_PLUGIN_DATA}" unmute)
 ---
 
 Run exactly ONE command with the shell tool you normally use, then reply with its output in one short line. Do nothing else.

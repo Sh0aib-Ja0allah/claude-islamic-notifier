@@ -360,6 +360,7 @@ argument-hint: ""
 allowed-tools:
   - Bash(sh "${CLAUDE_PLUGIN_ROOT}/scripts/ctl.sh" *)
   - PowerShell(& "${CLAUDE_PLUGIN_ROOT}/scripts/ctl.ps1" *)
+  - PowerShell(& "${CLAUDE_PLUGIN_ROOT}/scripts/ctl.ps1" -Data "${CLAUDE_PLUGIN_DATA}" mute)
 ---
 ```
 
@@ -372,7 +373,8 @@ allowed-tools:
 
 **Why both lines and both rules:**
 
-- On Windows, PowerShell is usually Claude's primary shell. That holds even with Git Bash installed, so both lines are needed, each pre-approved by its own rule.
+- On Windows, PowerShell is usually Claude's primary shell. That holds even with Git Bash installed, so both lines are needed, each pre-approved by its own rules.
+- On 2.1.261, a PowerShell command that starts with `&` is pre-approved only by an exact rule, so each skill also lists one exact rule per fixed form (the PowerShell line with the verb and its words filled in, such as `pauses on`), and `volume N` prompts once on the PowerShell tool. Launching through `powershell.exe -File` doesn't avoid this, because 2.1.261 always asks before starting a nested PowerShell process.
 - `${CLAUDE_PLUGIN_ROOT}` is substituted in `allowed-tools`. The docs say this for Bash rules, and the 2.1.261 binary does it for the whole field.
 - **"No permission prompt" is a release check (§10).**
 

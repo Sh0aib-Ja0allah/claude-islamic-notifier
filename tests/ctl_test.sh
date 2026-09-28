@@ -216,10 +216,24 @@ t_tsv_cells_match_appendix_a() {
 
 # --- the skills (section 4.6) ---------------------------------------------------------------
 
-# Seven skills, one verb each, with section 4.6's frontmatter and body, by text: the two
-# allowed-tools lines and the body's first line as PLAN.md has them, and both body lines with
-# the skill's own verb. ASCII. CRs are dropped before matching: git has no eol rule for .md,
-# so a Windows checkout (core.autocrlf=true) has CRLF skills.
+# skill_forms VERB: the fixed forms of VERB, one per line, each of which gets an exact
+# PowerShell rule. `volume N` has none: it keeps one prompt on the PowerShell tool.
+skill_forms() {
+  case $1 in
+    pauses) printf '%s\n' pauses 'pauses on' 'pauses off' ;;
+    sounds) printf '%s\n' sounds 'sounds list' 'sounds open' 'sounds mode both' 'sounds mode bundled' 'sounds mode custom' ;;
+    test) echo test; appendix_a | awk -F '`' '/^\| `[a-z-]+` \|/ { print "test " $2 }' ;;
+    *) echo "$1" ;;
+  esac
+}
+
+# Seven skills, one verb each, with section 4.6's frontmatter and body, by text. From line 5
+# on, each file is exactly: allowed-tools with the two rules PLAN.md has and one exact rule
+# per fixed form (the PowerShell body line with the verb and its words filled in; on 2.1.261
+# a command that starts with `&` is pre-approved only by an exact rule), then the body:
+# PLAN.md's first line, and both body lines with the skill's own verb. ASCII. CRs are dropped
+# before matching: git has no eol rule for .md, so a Windows checkout (core.autocrlf=true) has
+# CRLF skills.
 t_skills_match_section_4_6() {
   skills=$PLUGIN/skills
   assert_eq 'mute pauses sounds status test unmute volume' \
@@ -236,6 +250,11 @@ t_skills_match_section_4_6() {
   for l in "$bash_rule" "$ps_rule" "$intro" "$bash_line" "$ps_line"; do
     [ -n "$l" ] || fail 'section 4.6 lines not found in PLAN.md'
   done
+  ps_cmd=${ps_line#"- PowerShell tool: \`"}
+  ps_cmd=${ps_cmd%"\`"}
+  ps_head=${ps_cmd%" <verb> \$ARGUMENTS"}
+  [ "$ps_head" != "$ps_cmd" ] || fail "PLAN.md's PowerShell line does not end in <verb> \$ARGUMENTS"
+  grep -qxF -- "  - PowerShell($ps_head mute)" "$plan" || fail "PLAN.md's example has no exact mute rule"
   for verb in mute pauses sounds status test unmute volume; do
     [ -f "$skills/$verb/SKILL.md" ] || fail "no $skills/$verb/SKILL.md"
     f=$SB/$verb.md
@@ -247,12 +266,19 @@ t_skills_match_section_4_6() {
     grep -q '^description: .*: ' "$f" && fail "$verb: a colon in the description"
     grep -qx 'disable-model-invocation: true' "$f" || fail "$verb: disable-model-invocation"
     grep -q '^argument-hint: "[^"]*"$' "$f" || fail "$verb: argument-hint not quoted"
-    grep -qx 'allowed-tools:' "$f" || fail "$verb: allowed-tools"
-    grep -qxF -- "$bash_rule" "$f" || fail "$verb: the Bash rule"
-    grep -qxF -- "$ps_rule" "$f" || fail "$verb: the PowerShell rule"
-    grep -qxF -- "$intro" "$f" || fail "$verb: the body's first line"
-    grep -qxF -- "$(printf '%s\n' "$bash_line" | sed "s/<verb>/$verb/")" "$f" || fail "$verb: the Bash line"
-    grep -qxF -- "$(printf '%s\n' "$ps_line" | sed "s/<verb>/$verb/")" "$f" || fail "$verb: the PowerShell line"
+    want=$SB/$verb.want
+    {
+      echo 'allowed-tools:'
+      printf '%s\n' "$bash_rule" "$ps_rule"
+      skill_forms "$verb" | while IFS= read -r form; do
+        printf '  - PowerShell(%s %s)\n' "$ps_head" "$form"
+      done
+      printf '%s\n' '---' '' "$intro" ''
+      printf '%s\n' "$bash_line" "$ps_line" | sed "s/<verb>/$verb/"
+    } > "$want"
+    awk 'NR >= 5' "$f" > "$SB/$verb.got"
+    assert_eq "$(cat "$want")" "$(cat "$SB/$verb.got")" "$verb: allowed-tools and body"
+    assert_eq "$(wc -l < "$want")" "$(wc -l < "$SB/$verb.got")" "$verb: line count from line 5"
   done
 }
 
