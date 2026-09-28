@@ -1,15 +1,21 @@
 # Tests for plugins/islamic-notifier/scripts/play.ps1 (docs/PLAN.md, section 10). Plain
 # PowerShell with no framework, for Windows PowerShell 5.1 and PowerShell 7. Prints
-# "pass=N fail=M" and exits non-zero if any test fails; each failure is explained on stderr.
+# "pass=N fail=M skip=K" and exits non-zero if any test fails; each failure is explained on
+# stderr, and each skip on stdout.
 #
 # Usage, from the repo root:
 #   powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tests/play_test.ps1
+#   pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tests/play_test.ps1
 #
 # Every test gets a sandbox whose paths contain spaces. play.ps1 runs in a child process of
 # this same PowerShell, with an environment built from scratch: USERPROFILE, LOCALAPPDATA,
 # APPDATA, TEMP, TMP, CLAUDE_PLUGIN_DATA and CLAUDE_PLUGIN_ROOT point into the sandbox, and
 # no host variable such as SSH_* or CLAUDE_* comes through. No test is audible: a real play
 # is always at volume 0, or of a WAV with no samples.
+#
+# A test that needs a clip to play is skipped, with the reason, on a machine with no Windows
+# Media Player (wmp.dll) or no audio output, as a Windows Server CI runner may be (section 9).
+# Where both are present, a failed play fails the test.
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Off
@@ -21,6 +27,8 @@ $Fixtures = Join-Path $PSScriptRoot 'fixtures'
 $Exe = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
 $script:Pass = 0
 $script:Fail = 0
+$script:Skip = 0
+$script:SkipReason = $null
 $script:S = $null
 
 # The only host variables a child sees; everything else is the sandbox's.
@@ -80,19 +88,33 @@ function Remove-Sandbox {
     $script:S = $null
 }
 
-# Test NAME BODY: run BODY with a fresh sandbox in $S. A thrown error fails the test.
+# Test NAME BODY: run BODY with a fresh sandbox in $S. A thrown error fails the test, and
+# Skip-Test skips it.
 function Test([string]$name, [scriptblock]$body) {
     $script:S = New-Sandbox
+    $script:SkipReason = $null
     try {
         & $body
         $script:Pass++
     } catch {
-        $script:Fail++
-        [Console]::Error.WriteLine("FAIL ${name}: $($_.Exception.Message)")
+        if ($script:SkipReason) {
+            $script:Skip++
+            [Console]::Out.WriteLine("skip ${name}: $($script:SkipReason)")
+        } else {
+            $script:Fail++
+            [Console]::Error.WriteLine("FAIL ${name}: $($_.Exception.Message)")
+        }
     } finally {
         Wait-Workers
         Remove-Sandbox
     }
+}
+
+# Skip-Test REASON: end the test as skipped, for a capability this machine lacks. A skip is
+# never a pass.
+function Skip-Test([string]$reason) {
+    $script:SkipReason = $reason
+    throw "skip: $reason"
 }
 
 # ---- Running play.ps1
@@ -305,6 +327,46 @@ function Read-Data([string]$name) {
     [IO.File]::ReadAllText($f).TrimEnd("`n")
 }
 
+# ---- What this machine can play
+
+# WPF's MediaPlayer needs Windows Media Player (wmp.dll), and a clip plays to its end only
+# with an audio output. waveOutGetNumDevs counts no output when there is no audio device or
+# the Windows Audio service is not running; -1 means it could not be asked, which skips
+# nothing.
+function Get-AudioOutputCount {
+    try {
+        $t = Add-Type -Namespace PlayTest -Name WinMM -PassThru -MemberDefinition @'
+[DllImport("winmm.dll")] public static extern uint waveOutGetNumDevs();
+'@
+        [int]$t::waveOutGetNumDevs()
+    } catch {
+        -1
+    }
+}
+
+$HasWmp = [IO.File]::Exists((Join-Path ([Environment]::SystemDirectory) 'wmp.dll'))
+$AudioOutputs = Get-AudioOutputCount
+$script:NoMediaPlayer = $null
+if (-not $HasWmp) { $script:NoMediaPlayer = 'no Windows Media Player here (wmp.dll is missing)' }
+$script:NoPlayback = $script:NoMediaPlayer
+if (-not $script:NoPlayback -and $AudioOutputs -eq 0) {
+    $script:NoPlayback = 'no audio output here (waveOutGetNumDevs is 0)'
+}
+$AudioService = 'missing'
+try { $AudioService = [string](Get-Service -Name Audiosrv -ErrorAction Stop).Status } catch { }
+[Console]::Out.WriteLine("host: PowerShell $($PSVersionTable.PSVersion) $($PSVersionTable.PSEdition), " +
+    "wmp.dll $(if ($HasWmp) { 'yes' } else { 'no' }), audio outputs $AudioOutputs, audio service $AudioService")
+
+# For a test that needs MediaPlayer to exist.
+function Skip-UnlessMediaPlayer {
+    if ($script:NoMediaPlayer) { Skip-Test $script:NoMediaPlayer }
+}
+
+# For a test that needs a clip to play to its end.
+function Skip-UnlessPlayback {
+    if ($script:NoPlayback) { Skip-Test $script:NoPlayback }
+}
+
 # ---- Report
 
 # The report's keys, as notify.sh's report() prints them, in order.
@@ -344,7 +406,10 @@ Test 'report_values' {
     Assert-Eq '0 70 on both none 0' "$($rep.muted) $($rep.volume) $($rep.pauses) $($rep.sounds_mode) $($rep.remote) $($rep.force_local)" 'defaults'
     Assert-Eq 'ok free 0 none skip-no-clip' "$($rep.gap) $($rep.lock) $($rep.pool) $($rep.clip) $($rep.decision)" 'worker facts'
     Assert-True ($rep.execution_policy -cmatch '^(MachinePolicy|UserPolicy|Process|CurrentUser|LocalMachine):[A-Za-z]+(,[A-Za-z]+:[A-Za-z]+){4}\z') "execution_policy: $($rep.execution_policy)"
-    Assert-True ($rep.media_player -ceq 'yes' -or $rep.media_player -ceq 'no') "media_player: $($rep.media_player)"
+    # wmp.dll decides it, where PresentationCore loads.
+    $want = 'yes'
+    if ($script:NoMediaPlayer) { $want = 'no' }
+    Assert-Eq $want $rep.media_player 'media_player'
     if ($rep.media_player -eq 'yes') {
         Assert-Eq 'MediaPlayer none 0.70' "$($rep.player) $($rep.fallback) $($rep.player_volume)" 'player'
         # With a WAV to fall back on, and another volume.
@@ -352,6 +417,12 @@ Test 'report_values' {
         New-Wav (Join-Path $S.Bundled 'subhanallah.wav')
         $rep = Dry
         Assert-Eq 'MediaPlayer SoundPlayer 0.05 play' "$($rep.player) $($rep.fallback) $($rep.player_volume) $($rep.decision)" 'player with a WAV'
+    } else {
+        Assert-Eq 'none none none' "$($rep.player) $($rep.fallback) $($rep.player_volume)" 'player, no MediaPlayer'
+        Put (Join-Path $S.Data 'config') 'volume=5'
+        New-Wav (Join-Path $S.Bundled 'subhanallah.wav')
+        $rep = Dry
+        Assert-Eq 'SoundPlayer none none play' "$($rep.player) $($rep.fallback) $($rep.player_volume) $($rep.decision)" 'player with a WAV, no MediaPlayer'
     }
 }
 
@@ -639,6 +710,7 @@ Test 'hook_pipes_close_before_the_worker_ends' {
 # ---- The worker
 
 Test 'worker_held_mutex_exits_3' {
+    Skip-UnlessPlayback
     Put (Join-Path $S.Data 'config') 'volume=0'
     New-Wav (Join-Path $S.Bundled 'a.wav')
     $m = New-Object Threading.Mutex($false, $S.Mutex)
@@ -672,6 +744,7 @@ Test 'worker_mutex_name_is_local_islamicnotifier' {
 
 # A worker that died holding the mutex leaves it abandoned; the next one takes it (B.2 step 1).
 Test 'worker_abandoned_mutex_counts_as_taken' {
+    Skip-UnlessPlayback
     Put (Join-Path $S.Data 'config') 'volume=0'
     New-Wav (Join-Path $S.Bundled 'a.wav')
     # A handle of our own keeps the mutex alive after its owner exits.
@@ -700,6 +773,7 @@ Test 'worker_missing_file_exits_4' {
 }
 
 Test 'worker_gap' {
+    Skip-UnlessPlayback
     $t = Now
     $env = @{ ISLAMIC_NOTIFIER_TEST_NOW = "$t" }
     Put (Join-Path $S.Data 'config') 'volume=0'
@@ -727,6 +801,7 @@ Test 'worker_empty_pool_exits_0' {
 }
 
 Test 'worker_pool_modes' {
+    Skip-UnlessPlayback
     Put (Join-Path $S.Data 'config') 'volume=0'
     $b = Join-Path $S.Bundled 'subhanallah.wav'
     $c = Join-Path $S.Custom 'alhamdulillah.wav'
@@ -749,6 +824,7 @@ Test 'worker_pool_modes' {
 }
 
 Test 'worker_never_repeats_the_last_clip' {
+    Skip-UnlessPlayback
     Put (Join-Path $S.Data 'config') 'volume=0'
     # Not $s: PowerShell names ignore case, and $S is the sandbox.
     $alh = Join-Path $S.Bundled 'alhamdulillah.wav'
@@ -765,6 +841,7 @@ Test 'worker_never_repeats_the_last_clip' {
 }
 
 Test 'worker_variants_and_the_forced_id' {
+    Skip-UnlessPlayback
     Put (Join-Path $S.Data 'config') 'volume=0'
     foreach ($n in 'subhanallah.female.wav', 'subhanallah2.wav', 'alhamdulillah.wav') {
         New-Wav (Join-Path $S.Bundled $n)
@@ -789,6 +866,7 @@ Test 'worker_extensions_in_any_case' {
 }
 
 Test 'worker_name_with_a_space_hash_percent_and_brackets_plays' {
+    Skip-UnlessPlayback
     Put (Join-Path $S.Data 'config') 'volume=0'
     $f = Join-Path $S.Custom 'a b#c%d [1].wav'
     New-Wav $f
@@ -798,6 +876,7 @@ Test 'worker_name_with_a_space_hash_percent_and_brackets_plays' {
 }
 
 Test 'worker_arabic_name_plays' {
+    Skip-UnlessPlayback
     Put (Join-Path $S.Data 'config') 'volume=0'
     $f = Join-Path $S.Custom ((-join [char[]](0x0633, 0x0628, 0x062D, 0x0627, 0x0646)) + '.wav')
     New-Wav $f
@@ -807,6 +886,7 @@ Test 'worker_arabic_name_plays' {
 }
 
 Test 'worker_silent_real_play_ends_and_writes_state' {
+    Skip-UnlessPlayback
     Put (Join-Path $S.Data 'config') 'volume=0'
     $f = Join-Path $S.Bundled 'subhanallah.wav'
     New-Wav $f 44100
@@ -826,6 +906,7 @@ Test 'worker_silent_real_play_ends_and_writes_state' {
 }
 
 Test 'worker_mediaplayer_that_throws_falls_back_to_soundplayer' {
+    Skip-UnlessMediaPlayer
     $env = @{ ISLAMIC_NOTIFIER_TEST_NO_MEDIAPLAYER = 'throw' }
     Put (Join-Path $S.Data 'config') 'volume=50'
     $f = Join-Path $S.Bundled 'subhanallah.wav'
@@ -879,6 +960,7 @@ Test 'worker_no_soundplayer_at_volume_0' {
 }
 
 Test 'worker_path_skips_the_gap_the_pick_and_the_state' {
+    Skip-UnlessMediaPlayer
     $t = Now
     # 1 s ago: inside the gap, and not what a play now would write.
     Put (Join-Path $S.Data 'last-play') "$($t - 1)"
@@ -907,6 +989,7 @@ Test 'worker_relative_data_dir_is_the_hooks' {
 }
 
 Test 'worker_unc_clip_is_played_from_a_temp_copy' {
+    Skip-UnlessPlayback
     $f = Join-Path $S.Dir 'on a share.wav'
     New-Wav $f
     $unc = '\\?\' + $f
@@ -918,6 +1001,7 @@ Test 'worker_unc_clip_is_played_from_a_temp_copy' {
 
 # The same pipe test as above, with a real, silent forced play instead of the hold seam.
 Test 'hook_pipes_close_before_a_forced_silent_worker_ends' {
+    Skip-UnlessPlayback
     Put (Join-Path $S.Data 'config') 'volume=0'
     Put (Join-Path $S.Data 'force-next') "$(Now) *"
     $f = Join-Path $S.Bundled 'subhanallah.wav'
@@ -943,6 +1027,6 @@ Test 'hook_pipes_close_before_a_forced_silent_worker_ends' {
     [Console]::Error.WriteLine("  (handles, real play: hook pipes closed at $eof ms; worker ended at $end ms)")
 }
 
-[Console]::Out.WriteLine("pass=$($script:Pass) fail=$($script:Fail)")
+[Console]::Out.WriteLine("pass=$($script:Pass) fail=$($script:Fail) skip=$($script:Skip)")
 if ($script:Fail -gt 0) { exit 1 }
 exit 0
