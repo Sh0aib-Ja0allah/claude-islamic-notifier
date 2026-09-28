@@ -918,7 +918,7 @@ t_pool_never_repeats_the_last_clip() {
   clip bundled alhamdulillah.wav
   clip bundled subhanallah.wav
   put "$SB_DATA/last-file" "$SB_BUNDLED/subhanallah.wav"
-  for k in 1 2 3 4 5 6; do
+  for _ in 1 2 3 4 5 6; do
     rm -f "$SB_DATA/last-play"
     hook
   done
