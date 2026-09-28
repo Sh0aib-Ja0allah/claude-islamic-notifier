@@ -204,7 +204,9 @@ printf '%s\n' "$2" | tr / '\\'
 EOF
 }
 
-# winpath P: what shim_path prints for "-w P".
+# winpath P: what shim_path prints for "-w P". '\\' is tr's escaped backslash, not an
+# attempt to escape a quote.
+# shellcheck disable=SC1003
 winpath() { printf 'C:'; printf '%s\n' "$1" | tr / '\\'; }
 
 # shim_timeout: a fake timeout that logs its call, drops "-k 2 30" and runs the rest.

@@ -26,6 +26,8 @@ REPO=${TESTS%/*}
 NOTIFY=$REPO/plugins/islamic-notifier/scripts/notify.sh
 FIXTURES=$TESTS/fixtures
 
+# For shellcheck -x, run from the repo root.
+# shellcheck source=tests/lib.sh
 . "$TESTS/lib.sh"
 lib_init
 
@@ -55,6 +57,8 @@ t_harness_sandbox_paths_have_spaces() {
 t_harness_path_has_no_host_programs() {
   for p in afplay paplay pw-play aplay mpg123 ffplay mpv pactl powershell.exe cygpath \
     wslpath timeout sh bash dash; do
+    # $1 is for the inner shell, which gets the name as its first argument.
+    # shellcheck disable=SC2016
     found=$(env -i "PATH=$SB_PATH" "$TEST_SHELL_PATH" -c 'command -v "$1"' x "$p")
     assert_eq '' "$found" "$p on the sandbox PATH"
   done
@@ -992,7 +996,7 @@ t_pool_forced_id_filters_the_pool() {
   mac
   for n in subhanallah alhamdulillah allahu-akbar la-hawla; do clip bundled "$n.wav"; done
   clip custom alhamdulillah.mp3
-  for k in 1 2 3 4; do
+  for _ in 1 2 3 4; do
     rm -f "$SB_DATA/last-play"
     put "$SB_DATA/force-next" "$(now) alhamdulillah"
     hook
@@ -1421,8 +1425,9 @@ t_state_written_after_a_play() {
   hook
   after=$(now)
   lp=$(cat "$SB_DATA/last-play")
-  [ "$lp" -ge "$before" ] && [ "$lp" -le "$after" ] ||
+  if ! { [ "$lp" -ge "$before" ] && [ "$lp" -le "$after" ]; }; then
     fail "last-play $lp is not between $before and $after"
+  fi
   assert_content "$SB_DATA/last-file" "$SB_BUNDLED/subhanallah.wav"
   assert_eq 'last-file last-play' "$(data_files)" "data dir files"
 }

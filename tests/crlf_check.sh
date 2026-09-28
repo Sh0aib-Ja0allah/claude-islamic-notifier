@@ -22,6 +22,8 @@ bad=0
 while IFS= read -r f; do
   [ -n "$f" ] || continue
   checked=$((checked + 1))
+  # tr and cmp only read the file; nothing in this pipeline writes it.
+  # shellcheck disable=SC2094
   if ! tr -d '\015' < "$f" | cmp -s - "$f"; then
     bad=$((bad + 1))
     printf 'CRLF %s\n' "${f#"$REPO"/}"
