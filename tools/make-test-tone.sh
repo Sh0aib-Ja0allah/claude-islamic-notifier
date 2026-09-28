@@ -24,7 +24,9 @@ tmp=$out.tmp.$$
 trap 'rm -f "$tmp"' EXIT
 trap 'exit 1' HUP INT TERM
 
-mkdir -p "${out%/*}" || exit 1
+case $out in
+  */*) mkdir -p "${out%/*}" || exit 1 ;;
+esac
 
 # awk prints the file as lines of printf octal escapes (\ooo), 64 bytes per line.
 awk 'function le(v, n,    s, i) {   # v as n little-endian bytes

@@ -10,6 +10,7 @@
 #   PATH   the sandbox shim dir, then a toolbox of wrappers around a few core tools
 # The host's /usr/bin is never on that PATH, so no real player, pactl or PowerShell can run.
 # Each shim appends one line per call to $SB/log/<name>: name|arg1|arg2...
+# The helpers below use short global names (a c d f i l p t); tests use longer ones.
 
 # Core tools that notify.sh and the shims may run. Players, uname, pactl, powershell.exe,
 # cygpath, wslpath and timeout are never here: a test adds a shim when it wants one.
@@ -41,12 +42,16 @@ lib_init() {
   N=0
 }
 
-# t NAME: run test function t_NAME in a subshell with a fresh sandbox, then delete it.
+# t NAME: run test function t_NAME in a subshell with a fresh sandbox, then delete it. A
+# name with no such function fails.
 t() {
   N=$((N + 1))
   TEST=$1
   new_sandbox
-  if ("t_$1"; exit 0); then
+  if ! command -v "t_$1" > /dev/null 2>&1; then
+    printf 'FAIL %s: no function t_%s\n' "$1" "$1" >&2
+    FAIL=$((FAIL + 1))
+  elif ("t_$1"; exit 0); then
     PASS=$((PASS + 1))
   else
     FAIL=$((FAIL + 1))
@@ -80,10 +85,11 @@ new_sandbox() {
   shim uname 0 Linux
 }
 
-# nrun [NAME=value ...] [ARG ...]: run notify.sh in the sandbox. NAME=value words go into
-# its environment, the other words are its arguments. stdin comes from the caller. stdout
-# goes to $SB/out, stderr to $SB/err, and the exit status to RC.
+# nrun [NAME=value ...] [ARG ...]: run notify.sh in the sandbox, from $SB. NAME=value words
+# go into its environment, the other words are its arguments. stdin comes from the caller.
+# stdout goes to $SB/out, stderr to $SB/err, and the exit status to RC.
 nrun() {
+  cd "$SB" || fail "cannot cd to $SB"
   c=$#
   for a in "$@"; do
     case $a in [A-Za-z_]*=*) set -- "$@" "$a" ;; esac
@@ -134,8 +140,9 @@ rget() {
   printf '<missing>\n'
 }
 
-# Shims. Each one logs its call to $SB/log/<name>, its cwd to $SB/log/<name>.cwd, and
-# whether $SB_DATA/play.lock existed during the call to $SB/log/<name>.lock.
+# Shims. Each one logs its call to $SB/log/<name>, its cwd to $SB/log/<name>.cwd, whether
+# $SB_DATA/play.lock existed during the call to $SB/log/<name>.lock, and the lock's ts at
+# that moment to $SB/log/<name>.ts.
 
 # shim_write NAME: write shim NAME; its body comes from stdin, after the logging preamble.
 shim_write() {
@@ -148,6 +155,7 @@ n=${0##*/}
 { printf '%s' "$n"; for a in "$@"; do printf '|%s' "$a"; done; printf '\n'; } >> "$sb/log/$n"
 pwd -P >> "$sb/log/$n.cwd"
 if [ -d "$sb/data dir/play.lock" ]; then echo held; else echo free; fi >> "$sb/log/$n.lock"
+[ -f "$sb/data dir/play.lock/ts" ] && cat "$sb/data dir/play.lock/ts" >> "$sb/log/$n.ts"
 EOF
     cat
   } > "$SB/shims/$1"
@@ -196,15 +204,23 @@ exec "$@"
 EOF
 }
 
-# shim_clock: a fake date whose clock jumps 10 s forward on every call.
+# shim_frozen_date: a fake date that always prints the epoch in $T, set to now here. Tests
+# write ages relative to $T, so they stay exact however slow the machine is.
+shim_frozen_date() {
+  T=$(date +%s)
+  shim date 0 "$T"
+}
+
+# shim_clock STEP: a fake date that starts at $T (now) and moves STEP seconds forward on
+# every call: T+STEP, T+2*STEP, ... Two reads around a player are STEP apart.
 shim_clock() {
+  T=$(date +%s)
+  printf '%s %s\n' "$T" "$1" > "$SB/cfg/clock"
   shim_write date <<'EOF'
-k=0
-[ -f "$sb/cfg/clock" ] && read -r k < "$sb/cfg/clock"
-k=$((k + 1))
-printf '%s\n' "$k" > "$sb/cfg/clock"
-now=$("$tb/date" +%s)
-printf '%s\n' "$((now + 10 * k))"
+read -r base step k < "$sb/cfg/clock"
+k=$((${k:-0} + 1))
+printf '%s %s %s\n' "$base" "$step" "$k" > "$sb/cfg/clock"
+printf '%s\n' "$((base + step * k))"
 EOF
 }
 

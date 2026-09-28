@@ -9,8 +9,11 @@
 #
 # No test sleeps, plays audio or starts PowerShell: players, pactl, powershell.exe, cygpath,
 # wslpath, uname and timeout are shims (tests/lib.sh). Ages are epochs written relative to
-# `date +%s`, with a margin of a few seconds either side of each limit.
+# `date +%s`. Tests at a limit (MIN_GAP, STALE_LOCK, FORCE_TTL, the 1 s fast failure) also
+# freeze notify.sh's clock with a date shim, so a slow machine cannot move them across it;
+# the others keep a margin of 20 s or more.
 
+unset CDPATH
 case $0 in
   */*) TESTS=${0%/*} ;;
   *) TESTS=. ;;
@@ -67,8 +70,10 @@ t_harness_shim_logs_argv_and_obeys_config() {
 
 t_tone_is_deterministic_pcm_wav() {
   sh "$REPO/tools/make-test-tone.sh" "$SB/one.wav" || fail "make-test-tone.sh failed"
-  sh "$REPO/tools/make-test-tone.sh" "$SB/two.wav" || fail "make-test-tone.sh failed"
+  (cd "$SB" && sh "$REPO/tools/make-test-tone.sh" two.wav) || fail "make-test-tone.sh failed"
   assert_eq "$(cksum < "$SB/one.wav")" "$(cksum < "$SB/two.wav")" "cksum of two runs"
+  # Integer math only, so the bytes are the same on every awk.
+  assert_eq '1805358920 88244' "$(cksum < "$SB/one.wav")" "cksum"
   size=$(wc -c < "$SB/one.wav")
   assert_eq 88244 "${size##* }" "size"
   head=$(od -An -tx1 -N44 "$SB/one.wav" | tr -d ' \n')
@@ -90,6 +95,18 @@ t_hook_bad_arguments_exit_0_quietly() {
   expect_quiet_exit
   nrun --hook --force < "$SB_INPUT"
   expect_quiet_exit
+}
+
+t_hook_ignores_inherited_shell_options() {
+  mac
+  clip bundled subhanallah.wav
+  clip bundled alhamdulillah.wav
+  put "$SB_DATA/last-play" "$(ago 60)"
+  put "$SB_DATA/last-file" "$SB_BUNDLED/subhanallah.wav"
+  # Read by bash when it runs as sh; dash ignores it.
+  hook SHELLOPTS=errexit:noclobber:noglob:nounset
+  assert_calls afplay "$(afplay_line "$SB_BUNDLED/alhamdulillah.wav")"
+  assert_content "$SB_DATA/last-file" "$SB_BUNDLED/alhamdulillah.wav"
 }
 
 t_hook_silences_what_it_runs() {
@@ -204,7 +221,10 @@ t_os_linux_with_microsoft_proc_version_is_wsl() {
   put "$SB_SYS/proc/version" \
     'Linux version 5.15.167.4-microsoft-standard-WSL2 (root@f9c826d3017f) (gcc (GCC) 11.2.0)'
   dry
-  assert_eq wsl "$(rget os)" os
+  assert_eq wsl "$(rget os)" "os, WSL2"
+  put "$SB_SYS/proc/version" 'Linux version 4.4.0-19041-Microsoft (Microsoft@Microsoft.com)'
+  dry
+  assert_eq wsl "$(rget os)" "os, WSL1"
 }
 
 t_os_linux_with_plain_proc_version_is_linux() {
@@ -282,8 +302,13 @@ t_remote_force_local_plays() {
 
 t_remote_values_other_than_true_do_not_skip() {
   win
-  hook CODESPACES=false REMOTE_CONTAINERS=1 CLAUDE_CODE_REMOTE= SSH_TTY=
+  hook CODESPACES=false REMOTE_CONTAINERS=1 CLAUDE_CODE_REMOTE=
   assert_calls powershell.exe "$(ps_line)"
+}
+
+t_remote_set_but_empty_counts_as_set() {
+  expect_remote ssh SSH_TTY=
+  expect_remote gitpod GITPOD_WORKSPACE_ID=
 }
 
 # --- section 10 bullet 3: mute, volume 0, force-next -------------------------------------
@@ -314,8 +339,9 @@ t_mute_volume_0_skips() {
 
 t_force_fresh_marker_plays_while_muted() {
   win
+  shim_frozen_date
   put "$SB_DATA/config" muted=1
-  put "$SB_DATA/force-next" "$(ago 100) *"
+  put "$SB_DATA/force-next" "$((T - 120)) *"
   hook
   assert_calls powershell.exe "$(ps_line -Force '*')"
   assert_no_file "$SB_DATA/force-next"
@@ -328,10 +354,35 @@ t_force_fresh_marker_plays_while_env_muted() {
   assert_calls powershell.exe "$(ps_line -Force subhanallah)"
 }
 
+t_force_plays_even_at_volume_0() {
+  mac
+  shim_frozen_date
+  clip bundled subhanallah.wav
+  put "$SB_DATA/config" volume=0
+  put "$SB_DATA/force-next" "$T *"
+  hook
+  assert_calls afplay "$(afplay_line "$SB_BUNDLED/subhanallah.wav" 0.00)"
+}
+
+t_force_marker_with_a_bad_epoch_is_ignored() {
+  win
+  shim_frozen_date
+  put "$SB_DATA/config" muted=1
+  for bad in "0$T" 123456789012345678901234 12a4; do
+    put "$SB_DATA/force-next" "$bad *"
+    dry
+    assert_eq none "$(rget force)" "force for $bad"
+    hook
+    assert_not_called powershell.exe
+    assert_eq config "$(data_files)" "data dir files after $bad"
+  done
+}
+
 t_force_marker_older_than_120s_is_ignored() {
   win
+  shim_frozen_date
   put "$SB_DATA/config" muted=1
-  put "$SB_DATA/force-next" "$(ago 130) *"
+  put "$SB_DATA/force-next" "$((T - 121)) *"
   dry
   assert_eq none "$(rget force)" force
   hook
@@ -437,7 +488,7 @@ t_pauses_minified_and_spaced_json() {
   assert_eq skip-paused "$(rget decision)" "minified, one task"
   printf '{ "background_tasks" : [ ],\r\n\t"session_crons" : [\n ] }' > "$SB/in.json"
   nrun --hook --dry-run < "$SB/in.json"
-  assert_eq play "$(rget decision)" "spaced, empty arrays"
+  assert_eq idle "$(rget input)" "spaced, empty arrays"
   printf '{"last_assistant_message":"see \\"background_tasks\\":[{ here"}' > "$SB/in.json"
   nrun --hook --dry-run < "$SB/in.json"
   assert_eq idle "$(rget input)" "the key quoted inside a string"
@@ -575,6 +626,789 @@ t_handoff_dry_run_starts_nothing() {
   assert_not_called cygpath
 }
 
+# --- playback helpers ------------------------------------------------------------------------
+
+# mac: fake macOS with an afplay shim.
+mac() {
+  shim_out uname Darwin
+  shim afplay
+}
+
+# played NAME: the clip (last argument) of each call of shim NAME, one per line.
+played() { calls "$1" | awk -F'|' '{ print $NF }'; }
+
+# data_files: the names in the data dir, sorted, or * when it is empty.
+data_files() { (cd "$SB_DATA" && echo *); }
+
+# afplay_line CLIP [DECIMAL]
+afplay_line() { printf 'afplay|-v|%s|-t|30|%s\n' "${2:-0.70}" "$1"; }
+
+# --- section 10 bullet 5: minimum gap, lock, stale lock -----------------------------------
+
+t_gap_last_play_now_skips() {
+  mac
+  shim_frozen_date
+  clip bundled subhanallah.wav
+  for age in 0 1; do
+    put "$SB_DATA/last-play" "$((T - age))"
+    hook
+    assert_not_called afplay
+  done
+  dry
+  assert_eq 'recent skip-gap' "$(rget gap) $(rget decision)" "gap decision"
+}
+
+t_gap_last_play_3s_ago_plays() {
+  mac
+  shim_frozen_date
+  clip bundled subhanallah.wav
+  put "$SB_DATA/last-play" "$((T - 3))"
+  dry
+  assert_eq 'ok play' "$(rget gap) $(rget decision)" "gap decision"
+  hook
+  assert_calls afplay "$(afplay_line "$SB_BUNDLED/subhanallah.wav")"
+  # MIN_GAP itself (2 s) is enough.
+  put "$SB_DATA/last-play" "$((T - 2))"
+  hook
+  assert_calls afplay "$(afplay_line "$SB_BUNDLED/subhanallah.wav")
+$(afplay_line "$SB_BUNDLED/subhanallah.wav")"
+}
+
+t_gap_last_play_in_the_future_does_not_block() {
+  mac
+  clip bundled subhanallah.wav
+  put "$SB_DATA/last-play" "$(ago -100)"
+  hook
+  assert_calls afplay "$(afplay_line "$SB_BUNDLED/subhanallah.wav")"
+}
+
+t_gap_bad_last_play_is_ignored() {
+  mac
+  shim_frozen_date
+  clip bundled subhanallah.wav
+  for bad in 09 "0$T" 123456789012345678901234 x; do
+    put "$SB_DATA/last-play" "$bad"
+    rm -f "$SB/log/afplay"
+    dry
+    assert_eq ok "$(rget gap)" "gap with last-play $bad"
+    hook
+    assert_calls afplay "$(afplay_line "$SB_BUNDLED/subhanallah.wav")"
+  done
+}
+
+t_lock_fresh_ts_skips_and_is_left_alone() {
+  mac
+  shim_frozen_date
+  clip bundled subhanallah.wav
+  ts=$((T - 34))
+  put "$SB_DATA/play.lock/ts" "$ts"
+  hook
+  assert_not_called afplay
+  assert_content "$SB_DATA/play.lock/ts" "$ts"
+  dry
+  assert_eq 'busy skip-busy' "$(rget lock) $(rget decision)" "lock decision"
+}
+
+t_lock_without_ts_skips_and_is_left_alone() {
+  mac
+  shim_frozen_date
+  clip bundled subhanallah.wav
+  mkdir -p "$SB_DATA/play.lock"
+  dry
+  assert_eq 'busy skip-busy' "$(rget lock) $(rget decision)" "lock decision"
+  assert_no_file "$SB_DATA/play.lock/ts"
+  hook
+  assert_not_called afplay
+  [ -d "$SB_DATA/play.lock" ] || fail "the lock was removed"
+  # The hook stamps it, so a lock whose owner died before writing ts ages like any other.
+  assert_content "$SB_DATA/play.lock/ts" "$T"
+  shim_out date "$((T + 34))"
+  hook
+  assert_not_called afplay
+  shim_out date "$((T + 35))"
+  hook
+  assert_calls afplay "$(afplay_line "$SB_BUNDLED/subhanallah.wav")"
+}
+
+t_lock_with_a_bad_ts_counts_as_missing() {
+  mac
+  shim_frozen_date
+  clip bundled subhanallah.wav
+  for bad in 09 123456789012345678901234 x; do
+    put "$SB_DATA/play.lock/ts" "$bad"
+    dry
+    assert_eq busy "$(rget lock)" "lock with ts $bad"
+    hook
+    assert_not_called afplay
+    assert_content "$SB_DATA/play.lock/ts" "$T"
+  done
+}
+
+t_lock_far_in_the_future_is_stale() {
+  mac
+  shim_frozen_date
+  clip bundled subhanallah.wav
+  put "$SB_DATA/play.lock/ts" "$((T + 34))"
+  dry
+  assert_eq busy "$(rget lock)" "lock 34 s ahead"
+  put "$SB_DATA/play.lock/ts" "$((T + 35))"
+  dry
+  assert_eq stale "$(rget lock)" "lock 35 s ahead"
+  hook
+  assert_calls afplay "$(afplay_line "$SB_BUNDLED/subhanallah.wav")"
+}
+
+t_lock_ts_is_restamped_before_each_player() {
+  shim_clock 1
+  clip bundled subhanallah.wav
+  shim paplay 1
+  shim aplay
+  hook
+  # Reads: NOW = T+1, then T+2 before paplay, T+3 after it, T+4 before aplay.
+  assert_content "$SB/log/paplay.ts" "$((T + 2))"
+  assert_content "$SB/log/aplay.ts" "$((T + 4))"
+}
+
+t_lock_exit_leaves_a_lock_it_no_longer_owns() {
+  mac
+  clip bundled subhanallah.wav
+  # While afplay plays, another run takes the lock over.
+  shim_write afplay <<'EOF'
+printf '99999\n' > "$sb/data dir/play.lock/pid"
+EOF
+  hook
+  assert_content "$SB_DATA/play.lock/pid" 99999
+}
+
+t_lock_released_and_exit_0_when_signalled() {
+  for sig in TERM HUP INT; do
+    rm -rf "$SB_DATA/play.lock" "$SB_DATA/last-play" "$SB/log"
+    mkdir "$SB/log"
+    clip bundled subhanallah.wav
+    shim_write paplay <<EOF
+kill -$sig "\$PPID"
+exit 1
+EOF
+    shim aplay
+    hook
+    assert_calls paplay "paplay|--volume=58190|$SB_BUNDLED/subhanallah.wav"
+    assert_not_called aplay
+    assert_no_file "$SB_DATA/play.lock"
+  done
+}
+
+t_lock_older_than_35s_is_broken() {
+  mac
+  shim_frozen_date
+  clip bundled subhanallah.wav
+  put "$SB_DATA/play.lock/ts" "$((T - 40))"
+  dry
+  assert_eq 'stale play' "$(rget lock) $(rget decision)" "lock decision"
+  # STALE_LOCK itself (35 s) is stale.
+  put "$SB_DATA/play.lock/ts" "$((T - 35))"
+  dry
+  assert_eq 'stale play' "$(rget lock) $(rget decision)" "lock decision at 35 s"
+  hook
+  assert_calls afplay "$(afplay_line "$SB_BUNDLED/subhanallah.wav")"
+  assert_eq 'last-file last-play' "$(data_files)" "data dir files"
+}
+
+t_lock_is_held_while_playing_and_gone_after() {
+  mac
+  clip bundled subhanallah.wav
+  dry
+  assert_eq free "$(rget lock)" lock
+  hook
+  assert_content "$SB/log/afplay.lock" held
+  assert_no_file "$SB_DATA/play.lock"
+}
+
+t_lock_is_released_when_nothing_plays() {
+  shim_out uname Darwin
+  clip bundled subhanallah.wav
+  hook
+  assert_no_file "$SB_DATA/play.lock"
+  mac
+  rm -f "$SB_BUNDLED/subhanallah.wav"
+  hook
+  assert_no_file "$SB_DATA/play.lock"
+  assert_not_called afplay
+  assert_eq '*' "$(data_files)" "data dir files"
+}
+
+# --- section 10 bullet 6: the pool --------------------------------------------------------
+
+t_pool_empty_calls_no_player() {
+  mac
+  hook
+  assert_not_called afplay
+  assert_eq '*' "$(data_files)" "data dir files"
+  dry
+  assert_eq '0 none skip-no-clip' "$(rget pool) $(rget clip) $(rget decision)" \
+    "pool clip decision"
+}
+
+t_pool_of_one_plays_it_even_after_itself() {
+  mac
+  clip bundled subhanallah.wav
+  put "$SB_DATA/last-file" "$SB_BUNDLED/subhanallah.wav"
+  hook
+  assert_calls afplay "$(afplay_line "$SB_BUNDLED/subhanallah.wav")"
+}
+
+t_pool_never_repeats_the_last_clip() {
+  mac
+  clip bundled alhamdulillah.wav
+  clip bundled subhanallah.wav
+  put "$SB_DATA/last-file" "$SB_BUNDLED/subhanallah.wav"
+  for k in 1 2 3 4 5 6; do
+    rm -f "$SB_DATA/last-play"
+    hook
+  done
+  a=$SB_BUNDLED/alhamdulillah.wav
+  s=$SB_BUNDLED/subhanallah.wav
+  assert_eq "$a
+$s
+$a
+$s
+$a
+$s" "$(played afplay)" "clips in play order"
+}
+
+t_pool_mode_both_uses_both_dirs() {
+  mac
+  clip bundled subhanallah.wav
+  clip custom alhamdulillah.wav
+  dry
+  assert_eq 2 "$(rget pool)" pool
+  put "$SB_DATA/last-file" "$SB_BUNDLED/subhanallah.wav"
+  hook
+  rm -f "$SB_DATA/last-play"
+  hook
+  assert_eq "$SB_CUSTOM/alhamdulillah.wav
+$SB_BUNDLED/subhanallah.wav" "$(played afplay)" "clips in play order"
+}
+
+t_pool_mode_bundled() {
+  mac
+  put "$SB_DATA/config" sounds_mode=bundled
+  clip bundled subhanallah.wav
+  clip custom alhamdulillah.wav
+  dry
+  assert_eq "1 $SB_BUNDLED/subhanallah.wav" "$(rget pool) $(rget clip)" "pool clip"
+  hook
+  assert_eq "$SB_BUNDLED/subhanallah.wav" "$(played afplay)" "clip played"
+}
+
+t_pool_mode_custom() {
+  mac
+  put "$SB_DATA/config" sounds_mode=custom
+  clip bundled subhanallah.wav
+  clip custom alhamdulillah.wav
+  dry
+  assert_eq "1 $SB_CUSTOM/alhamdulillah.wav" "$(rget pool) $(rget clip)" "pool clip"
+  hook
+  assert_eq "$SB_CUSTOM/alhamdulillah.wav" "$(played afplay)" "clip played"
+}
+
+t_pool_extensions_match_in_any_case() {
+  mac
+  for n in A.WAV b.Mp3 c.ogg d.wav.txt wav .hidden.wav; do clip custom "$n"; done
+  mkdir -p "$SB_CUSTOM/dir.wav"
+  dry
+  assert_eq 2 "$(rget pool)" pool
+  put "$SB_DATA/last-file" "$SB_CUSTOM/A.WAV"
+  hook
+  rm -f "$SB_DATA/last-play"
+  hook
+  assert_eq "$SB_CUSTOM/b.Mp3
+$SB_CUSTOM/A.WAV" "$(played afplay)" "clips in play order"
+}
+
+t_pool_variant_name_has_the_base_id() {
+  mac
+  for n in subhanallah.female.wav subhanallah2.wav alhamdulillah.wav; do clip bundled "$n"; done
+  put "$SB_DATA/force-next" "$(now) subhanallah"
+  dry
+  assert_eq "1 $SB_BUNDLED/subhanallah.female.wav" "$(rget pool) $(rget clip)" "pool clip"
+  hook
+  assert_calls afplay "$(afplay_line "$SB_BUNDLED/subhanallah.female.wav")"
+}
+
+t_pool_forced_id_filters_the_pool() {
+  mac
+  for n in subhanallah alhamdulillah allahu-akbar la-hawla; do clip bundled "$n.wav"; done
+  clip custom alhamdulillah.mp3
+  for k in 1 2 3 4; do
+    rm -f "$SB_DATA/last-play"
+    put "$SB_DATA/force-next" "$(now) alhamdulillah"
+    hook
+  done
+  # The first pick is random; after it the two alhamdulillah clips alternate.
+  assert_eq 4 "$(played afplay | awk 'END { print NR }')" plays
+  prev=
+  for f in $(played afplay | awk -F/ '{ print $NF }'); do
+    case $f in alhamdulillah.*) ;; *) fail "forced alhamdulillah, played $f" ;; esac
+    [ "$f" != "$prev" ] || fail "played $f twice in a row"
+    prev=$f
+  done
+}
+
+t_pool_draw_uses_od_on_urandom() {
+  mac
+  for n in a b c; do clip bundled "$n.wav"; done
+  for rv in '      0:a' '      1:b' '      2:c' '      4:b' '  65535:a'; do
+    shim od 0 "${rv%%:*}"
+    rm -f "$SB_DATA/last-play" "$SB_DATA/last-file" "$SB/log/afplay"
+    hook
+    assert_eq "$SB_BUNDLED/${rv#*:}.wav" "$(played afplay)" "pick for od output [${rv%%:*}]"
+  done
+  # With the last clip left out, the draw is over the other two.
+  put "$SB_DATA/last-file" "$SB_BUNDLED/a.wav"
+  shim od 0 '      3'
+  rm -f "$SB_DATA/last-play" "$SB/log/afplay"
+  hook
+  assert_eq "$SB_BUNDLED/c.wav" "$(played afplay)" "pick without a.wav"
+  case $(calls od) in
+    'od|-An|-N2|-tu2|/dev/urandom'*) ;;
+    *) fail "od calls: $(calls od)" ;;
+  esac
+}
+
+t_pool_forced_id_without_a_clip_plays_nothing() {
+  mac
+  clip bundled subhanallah.wav
+  put "$SB_DATA/force-next" "$(now) la-hawla"
+  hook
+  assert_not_called afplay
+  assert_eq '*' "$(data_files)" "data dir files"
+}
+
+t_pool_name_with_spaces_plays() {
+  mac
+  clip custom 'my dhikr clip.wav'
+  hook
+  assert_calls afplay "$(afplay_line "$SB_CUSTOM/my dhikr clip.wav")"
+}
+
+# --- section 10 bullet 7: players, flags, volume ---------------------------------------------
+
+t_player_mac_uses_afplay() {
+  mac
+  clip bundled subhanallah.wav
+  shim paplay
+  shim mpv
+  dry
+  assert_eq 'afplay none 0.70' "$(rget player) $(rget fallback) $(rget player_volume)" \
+    "player fallback player_volume"
+  hook
+  assert_calls afplay "$(afplay_line "$SB_BUNDLED/subhanallah.wav")"
+  assert_not_called paplay
+  assert_not_called mpv
+}
+
+t_player_mac_plays_mp3_with_afplay() {
+  mac
+  clip bundled subhanallah.mp3
+  shim mpg123
+  hook
+  assert_calls afplay "$(afplay_line "$SB_BUNDLED/subhanallah.mp3")"
+  assert_not_called mpg123
+}
+
+t_player_mac_without_afplay_plays_nothing() {
+  shim_out uname Darwin
+  clip bundled subhanallah.wav
+  shim mpv
+  shim paplay
+  hook
+  assert_not_called mpv
+  assert_not_called paplay
+  assert_eq '*' "$(data_files)" "data dir files"
+  dry
+  assert_eq 'none none skip-no-player' \
+    "$(rget player) $(rget player_volume) $(rget decision)" "player player_volume decision"
+}
+
+t_player_linux_wav_pipewire_uses_pw_play() {
+  clip bundled subhanallah.wav
+  shim pw-play
+  shim paplay
+  shim aplay
+  shim pactl 0 'Server Name: PulseAudio (on PipeWire 1.0.5)'
+  dry
+  assert_eq 'pw-play aplay' "$(rget player) $(rget fallback)" "player fallback"
+  hook
+  assert_calls pw-play "pw-play|--volume=0.70|$SB_BUNDLED/subhanallah.wav"
+  assert_calls pactl 'pactl|info
+pactl|info'
+  assert_not_called paplay
+  assert_not_called aplay
+}
+
+t_player_linux_wav_pulseaudio_uses_paplay() {
+  clip bundled subhanallah.wav
+  shim pw-play
+  shim paplay
+  shim pactl 0 'Server Name: pulseaudio'
+  hook
+  assert_calls paplay "paplay|--volume=58190|$SB_BUNDLED/subhanallah.wav"
+  assert_not_called pw-play
+}
+
+t_player_linux_wav_without_pactl_uses_paplay() {
+  clip bundled subhanallah.wav
+  shim pw-play
+  shim paplay
+  hook
+  assert_calls paplay "paplay|--volume=58190|$SB_BUNDLED/subhanallah.wav"
+  assert_not_called pw-play
+}
+
+t_player_linux_wav_pw_play_when_no_paplay() {
+  clip bundled subhanallah.wav
+  shim pw-play
+  shim pactl 0 'Server Name: pulseaudio'
+  hook
+  assert_calls pw-play "pw-play|--volume=0.70|$SB_BUNDLED/subhanallah.wav"
+  assert_not_called pactl
+}
+
+t_player_linux_wav_then_aplay_ffplay_mpv() {
+  clip bundled subhanallah.wav
+  for p in mpv ffplay aplay mpg123; do shim "$p"; done
+  dry
+  assert_eq 'aplay ffplay,mpv none' "$(rget player) $(rget fallback) $(rget player_volume)" \
+    "player fallback player_volume"
+  hook
+  assert_calls aplay "aplay|-q|$SB_BUNDLED/subhanallah.wav"
+  assert_not_called ffplay
+  assert_not_called mpg123
+}
+
+t_player_linux_wav_ffplay_flags() {
+  clip bundled subhanallah.wav
+  shim ffplay
+  shim mpv
+  hook
+  assert_calls ffplay "ffplay|-nodisp|-autoexit|-loglevel|quiet|-volume|70|\
+$SB_BUNDLED/subhanallah.wav"
+  assert_not_called mpv
+}
+
+t_player_linux_wav_mpv_flags() {
+  clip bundled subhanallah.wav
+  shim mpv
+  hook
+  assert_calls mpv "mpv|--video=no|--terminal=no|--volume=89|$SB_BUNDLED/subhanallah.wav"
+}
+
+t_player_linux_wav_never_mpg123() {
+  clip bundled subhanallah.wav
+  shim mpg123
+  hook
+  assert_not_called mpg123
+  dry
+  assert_eq skip-no-player "$(rget decision)" decision
+}
+
+t_player_linux_mp3_order() {
+  clip bundled subhanallah.mp3
+  for p in aplay paplay mpv ffplay mpg123; do shim "$p"; done
+  dry
+  assert_eq 'mpg123 ffplay,mpv,paplay 22937' \
+    "$(rget player) $(rget fallback) $(rget player_volume)" "player fallback player_volume"
+  hook
+  assert_calls mpg123 "mpg123|-q|-f|22937|$SB_BUNDLED/subhanallah.mp3"
+}
+
+t_player_linux_mp3_never_aplay() {
+  clip bundled subhanallah.mp3
+  shim aplay
+  hook
+  assert_not_called aplay
+}
+
+t_player_linux_mp3_pulse_player_last() {
+  clip bundled subhanallah.mp3
+  shim pw-play
+  shim paplay
+  shim pactl 0 'Server Name: PulseAudio (on PipeWire 1.2.7)'
+  shim mpv
+  dry
+  assert_eq 'mpv pw-play' "$(rget player) $(rget fallback)" "player fallback"
+}
+
+t_player_other_os_uses_linux_players() {
+  shim_out uname FreeBSD
+  clip bundled subhanallah.wav
+  shim mpv
+  hook
+  assert_calls mpv "mpv|--video=no|--terminal=no|--volume=89|$SB_BUNDLED/subhanallah.wav"
+}
+
+# wsl: fake WSL pieces: powershell.exe, wslpath and paplay shims, one clip, and /mnt/c.
+wsl() {
+  shim powershell.exe
+  shim_path wslpath
+  shim paplay
+  clip bundled subhanallah.wav
+  mkdir -p "$SB_SYS/mnt/c"
+}
+
+# wsl_line [VOLUME]: the powershell.exe call notify.sh makes on wsl.
+wsl_line() {
+  printf 'powershell.exe|-NoProfile|-NonInteractive|-ExecutionPolicy|Bypass|-File|%s|-Worker' \
+    "$(winpath "$SB_ROOT/scripts/play.ps1")"
+  printf '|%s|%s|%s|%s\n' -Path "$(winpath "$SB_BUNDLED/subhanallah.wav")" -Volume "${1:-70}"
+}
+
+t_player_wsl_runs_play_ps1_from_mnt_c() {
+  wsl
+  dry WSL_DISTRO_NAME=Ubuntu
+  assert_eq 'powershell.exe paplay 70' "$(rget player) $(rget fallback) $(rget player_volume)" \
+    "player fallback player_volume"
+  hook WSL_DISTRO_NAME=Ubuntu
+  assert_calls powershell.exe "$(wsl_line)"
+  assert_eq "$(cd "$SB_SYS/mnt/c" && pwd -P)" "$(cat "$SB/log/powershell.exe.cwd")" cwd
+  assert_not_called paplay
+}
+
+t_player_wsl_exit_4_falls_back_to_linux() {
+  wsl
+  shim_rc powershell.exe 4
+  hook WSL_DISTRO_NAME=Ubuntu
+  assert_calls powershell.exe "$(wsl_line)"
+  assert_calls paplay "paplay|--volume=58190|$SB_BUNDLED/subhanallah.wav"
+}
+
+t_player_wsl_exit_4_falls_back_even_when_slow() {
+  wsl
+  shim_clock 10
+  shim_rc powershell.exe 4
+  hook WSL_DISTRO_NAME=Ubuntu
+  assert_calls paplay "paplay|--volume=58190|$SB_BUNDLED/subhanallah.wav"
+}
+
+t_player_wsl_success_busy_and_kills_do_not_fall_back() {
+  wsl
+  shim_frozen_date
+  for rc in 0 3 124 137 143; do
+    shim_rc powershell.exe "$rc"
+    rm -f "$SB_DATA/last-play"
+    hook WSL_DISTRO_NAME=Ubuntu
+    assert_not_called paplay
+  done
+}
+
+t_player_wsl_other_fast_failure_falls_back() {
+  wsl
+  shim_frozen_date
+  shim_rc powershell.exe 126
+  hook WSL_DISTRO_NAME=Ubuntu
+  assert_calls paplay "paplay|--volume=58190|$SB_BUNDLED/subhanallah.wav"
+}
+
+t_player_wsl_other_slow_failure_does_not_fall_back() {
+  wsl
+  shim_clock 2
+  shim_rc powershell.exe 1
+  hook WSL_DISTRO_NAME=Ubuntu
+  assert_not_called paplay
+}
+
+t_player_wsl_without_powershell_uses_linux() {
+  wsl
+  rm -f "$SB/shims/powershell.exe"
+  hook WSL_DISTRO_NAME=Ubuntu
+  assert_calls paplay "paplay|--volume=58190|$SB_BUNDLED/subhanallah.wav"
+  case $(calls wslpath) in
+    'wslpath|-u|C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe') ;;
+    *) fail "wslpath calls: $(calls wslpath)" ;;
+  esac
+}
+
+t_player_wsl_finds_powershell_through_wslpath() {
+  wsl
+  mkdir -p "$SB/win dir"
+  mv "$SB/shims/powershell.exe" "$SB/win dir/powershell.exe"
+  printf '%s\n' "$SB/win dir/powershell.exe" > "$SB/cfg/wslpath.u"
+  hook WSL_DISTRO_NAME=Ubuntu
+  assert_calls powershell.exe "$(wsl_line)"
+  assert_not_called paplay
+}
+
+t_player_wsl_runs_even_if_cd_fails() {
+  wsl
+  rmdir "$SB_SYS/mnt/c"
+  hook WSL_DISTRO_NAME=Ubuntu
+  assert_calls powershell.exe "$(wsl_line)"
+  assert_eq "$(cd "$SB" && pwd -P)" "$(cat "$SB/log/powershell.exe.cwd")" cwd
+}
+
+# vol_case SHIM CLIP VOLUME:EXPECTED... : for each VOLUME, SHIM's volume argument is EXPECTED.
+vol_case() {
+  shim "$1"
+  clip bundled "$2"
+  vc_player=$1
+  vc_clip=$2
+  shift 2
+  for vv in "$@"; do
+    put "$SB_DATA/config" "volume=${vv%%:*}"
+    rm -f "$SB_DATA/last-play" "$SB/log/$vc_player"
+    hook
+    case $vc_player in
+      afplay) want="afplay|-v|${vv#*:}|-t|30" ;;
+      pw-play) want="pw-play|--volume=${vv#*:}" ;;
+      paplay) want="paplay|--volume=${vv#*:}" ;;
+      mpv) want="mpv|--video=no|--terminal=no|--volume=${vv#*:}" ;;
+      ffplay) want="ffplay|-nodisp|-autoexit|-loglevel|quiet|-volume|${vv#*:}" ;;
+      mpg123) want="mpg123|-q|-f|${vv#*:}" ;;
+    esac
+    assert_calls "$vc_player" "$want|$SB_BUNDLED/$vc_clip"
+  done
+}
+
+t_volume_decimal_for_afplay() {
+  shim_out uname Darwin
+  vol_case afplay subhanallah.wav 70:0.70 100:1.00 5:0.05 1:0.01 50:0.50
+}
+t_volume_decimal_for_pw_play() { vol_case pw-play subhanallah.wav 70:0.70 5:0.05; }
+t_volume_cubic_for_paplay() { vol_case paplay subhanallah.wav 70:58190 5:24144 100:65536; }
+t_volume_cubic_for_mpv() { vol_case mpv subhanallah.wav 70:89 5:37 100:100; }
+t_volume_linear_for_ffplay() { vol_case ffplay subhanallah.wav 70:70 5:5; }
+t_volume_linear_for_mpg123() { vol_case mpg123 subhanallah.mp3 70:22937 5:1638 100:32768; }
+
+t_volume_wsl_passes_the_integer() {
+  wsl
+  put "$SB_DATA/config" volume=5
+  hook WSL_DISTRO_NAME=Ubuntu
+  assert_calls powershell.exe "$(wsl_line 5)"
+}
+
+# fall_case RC: paplay fails with RC at once, aplay is next. The clock is frozen unless the
+# test brought its own, so "at once" does not depend on how busy the machine is.
+fall_case() {
+  [ -e "$SB/shims/date" ] || shim_frozen_date
+  clip bundled subhanallah.wav
+  shim paplay "$1"
+  shim aplay
+  hook
+  assert_calls paplay "paplay|--volume=58190|$SB_BUNDLED/subhanallah.wav"
+}
+
+t_fall_fast_failure_tries_the_next_player() {
+  fall_case 1
+  assert_calls aplay "aplay|-q|$SB_BUNDLED/subhanallah.wav"
+}
+
+t_fall_through_more_than_one_player() {
+  shim ffplay
+  shim_rc aplay 2
+  fall_case 1
+  assert_calls aplay "aplay|-q|$SB_BUNDLED/subhanallah.wav"
+  assert_calls ffplay "ffplay|-nodisp|-autoexit|-loglevel|quiet|-volume|70|\
+$SB_BUNDLED/subhanallah.wav"
+}
+
+t_fall_success_stops() {
+  fall_case 0
+  assert_not_called aplay
+}
+
+t_fall_timeout_124_stops() {
+  fall_case 124
+  assert_not_called aplay
+}
+
+t_fall_kill_137_stops() {
+  fall_case 137
+  assert_not_called aplay
+}
+
+t_fall_term_143_stops() {
+  fall_case 143
+  assert_not_called aplay
+}
+
+t_fall_failure_taking_1s_is_fast() {
+  shim_clock 1
+  fall_case 1
+  assert_calls aplay "aplay|-q|$SB_BUNDLED/subhanallah.wav"
+}
+
+t_fall_slow_failure_stops() {
+  shim_clock 2
+  fall_case 1
+  assert_not_called aplay
+}
+
+t_fall_timeout_wraps_every_player() {
+  shim_timeout
+  fall_case 1
+  assert_calls timeout "timeout|-k|2|30|paplay|--volume=58190|$SB_BUNDLED/subhanallah.wav
+timeout|-k|2|30|aplay|-q|$SB_BUNDLED/subhanallah.wav"
+}
+
+t_fall_timeout_wraps_afplay() {
+  mac
+  shim_timeout
+  clip bundled subhanallah.wav
+  hook
+  assert_calls timeout "timeout|-k|2|30|$(afplay_line "$SB_BUNDLED/subhanallah.wav")"
+  assert_calls afplay "$(afplay_line "$SB_BUNDLED/subhanallah.wav")"
+}
+
+# --- state files ---------------------------------------------------------------------------
+
+t_state_written_after_a_play() {
+  mac
+  clip bundled subhanallah.wav
+  before=$(now)
+  hook
+  after=$(now)
+  lp=$(cat "$SB_DATA/last-play")
+  [ "$lp" -ge "$before" ] && [ "$lp" -le "$after" ] ||
+    fail "last-play $lp is not between $before and $after"
+  assert_content "$SB_DATA/last-file" "$SB_BUNDLED/subhanallah.wav"
+  assert_eq 'last-file last-play' "$(data_files)" "data dir files"
+}
+
+t_state_not_written_when_skipped() {
+  mac
+  clip bundled subhanallah.wav
+  put "$SB_DATA/config" muted=1
+  hook
+  assert_not_called afplay
+  assert_eq config "$(data_files)" "data dir files"
+}
+
+t_state_dry_run_writes_nothing() {
+  mac
+  clip bundled subhanallah.wav
+  clip bundled alhamdulillah.wav
+  lp=$(ago 10)
+  put "$SB_DATA/last-play" "$lp"
+  put "$SB_DATA/last-file" "$SB_BUNDLED/subhanallah.wav"
+  dry
+  assert_eq "2 $SB_BUNDLED/alhamdulillah.wav afplay play" \
+    "$(rget pool) $(rget clip) $(rget player) $(rget decision)" "pool clip player decision"
+  assert_content "$SB_DATA/last-play" "$lp"
+  assert_content "$SB_DATA/last-file" "$SB_BUNDLED/subhanallah.wav"
+  assert_eq 'last-file last-play' "$(data_files)" "data dir files"
+  assert_not_called afplay
+}
+
+t_state_debug_log_records_the_player() {
+  mac
+  clip bundled subhanallah.wav
+  hook ISLAMIC_NOTIFIER_DEBUG=1
+  case $(cat "$SB_DATA/debug.log") in
+    *'afplay exited 0'*) ;;
+    *) fail "debug.log: $(cat "$SB_DATA/debug.log")" ;;
+  esac
+}
+
 # --- run -------------------------------------------------------------------------------
 
 # harness
@@ -586,6 +1420,7 @@ t tone_is_deterministic_pcm_wav
 # contract: exit 0, silence, the dry-run report, debug log, directories
 t hook_idle_exits_0_quietly
 t hook_bad_arguments_exit_0_quietly
+t hook_ignores_inherited_shell_options
 t hook_silences_what_it_runs
 t dryrun_keys_are_stable
 t dryrun_env_var_reports_and_hands_off_nothing
@@ -619,6 +1454,7 @@ t remote_dockerenv_skips
 t remote_containerenv_skips
 t remote_force_local_plays
 t remote_values_other_than_true_do_not_skip
+t remote_set_but_empty_counts_as_set
 
 # section 10 bullet 3: mute, volume 0, force-next
 t mute_config_skips
@@ -626,6 +1462,8 @@ t mute_env_skips
 t mute_volume_0_skips
 t force_fresh_marker_plays_while_muted
 t force_fresh_marker_plays_while_env_muted
+t force_plays_even_at_volume_0
+t force_marker_with_a_bad_epoch_is_ignored
 t force_marker_older_than_120s_is_ignored
 t force_marker_from_the_future_is_ignored
 t force_marker_with_crlf_and_no_id_means_any
@@ -662,5 +1500,84 @@ t handoff_force_passes_id_and_consumes_marker
 t handoff_force_star
 t handoff_without_cygpath_keeps_the_path
 t handoff_dry_run_starts_nothing
+
+# section 10 bullet 5: minimum gap, lock, stale lock
+t gap_last_play_now_skips
+t gap_last_play_3s_ago_plays
+t gap_last_play_in_the_future_does_not_block
+t gap_bad_last_play_is_ignored
+t lock_fresh_ts_skips_and_is_left_alone
+t lock_without_ts_skips_and_is_left_alone
+t lock_with_a_bad_ts_counts_as_missing
+t lock_older_than_35s_is_broken
+t lock_far_in_the_future_is_stale
+t lock_is_held_while_playing_and_gone_after
+t lock_is_released_when_nothing_plays
+t lock_ts_is_restamped_before_each_player
+t lock_exit_leaves_a_lock_it_no_longer_owns
+t lock_released_and_exit_0_when_signalled
+
+# section 10 bullet 6: the pool
+t pool_empty_calls_no_player
+t pool_of_one_plays_it_even_after_itself
+t pool_never_repeats_the_last_clip
+t pool_mode_both_uses_both_dirs
+t pool_mode_bundled
+t pool_mode_custom
+t pool_extensions_match_in_any_case
+t pool_variant_name_has_the_base_id
+t pool_forced_id_filters_the_pool
+t pool_draw_uses_od_on_urandom
+t pool_forced_id_without_a_clip_plays_nothing
+t pool_name_with_spaces_plays
+
+# section 10 bullet 7: players, flags, volume, fall-through
+t player_mac_uses_afplay
+t player_mac_plays_mp3_with_afplay
+t player_mac_without_afplay_plays_nothing
+t player_linux_wav_pipewire_uses_pw_play
+t player_linux_wav_pulseaudio_uses_paplay
+t player_linux_wav_without_pactl_uses_paplay
+t player_linux_wav_pw_play_when_no_paplay
+t player_linux_wav_then_aplay_ffplay_mpv
+t player_linux_wav_ffplay_flags
+t player_linux_wav_mpv_flags
+t player_linux_wav_never_mpg123
+t player_linux_mp3_order
+t player_linux_mp3_never_aplay
+t player_linux_mp3_pulse_player_last
+t player_other_os_uses_linux_players
+t player_wsl_runs_play_ps1_from_mnt_c
+t player_wsl_exit_4_falls_back_to_linux
+t player_wsl_exit_4_falls_back_even_when_slow
+t player_wsl_success_busy_and_kills_do_not_fall_back
+t player_wsl_other_fast_failure_falls_back
+t player_wsl_other_slow_failure_does_not_fall_back
+t player_wsl_without_powershell_uses_linux
+t player_wsl_finds_powershell_through_wslpath
+t player_wsl_runs_even_if_cd_fails
+t volume_decimal_for_afplay
+t volume_decimal_for_pw_play
+t volume_cubic_for_paplay
+t volume_cubic_for_mpv
+t volume_linear_for_ffplay
+t volume_linear_for_mpg123
+t volume_wsl_passes_the_integer
+t fall_fast_failure_tries_the_next_player
+t fall_failure_taking_1s_is_fast
+t fall_through_more_than_one_player
+t fall_success_stops
+t fall_timeout_124_stops
+t fall_kill_137_stops
+t fall_term_143_stops
+t fall_slow_failure_stops
+t fall_timeout_wraps_every_player
+t fall_timeout_wraps_afplay
+
+# state files (B.1 step 17)
+t state_written_after_a_play
+t state_not_written_when_skipped
+t state_dry_run_writes_nothing
+t state_debug_log_records_the_player
 
 lib_summary
