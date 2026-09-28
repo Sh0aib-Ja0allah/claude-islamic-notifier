@@ -118,7 +118,8 @@ MODE=both
 MODE_SRC=default
 read_config() {
   [ -f "$DATA/config" ] || return 0
-  { : < "$DATA/config"; } 2>/dev/null || return 0
+  # true, not ":": a failed redirection on a special built-in exits dash and bash --posix.
+  { true < "$DATA/config"; } 2>/dev/null || return 0
   first=1
   while IFS= read -r line || [ -n "$line" ]; do
     if [ "$first" = 1 ]; then
@@ -199,7 +200,7 @@ commit() {
 set_key() {
   # A config that cannot be read is not rewritten: its other lines would be lost. It is
   # opened, not tested with -r, which Git Bash answers without the Windows ACL.
-  if [ -f "$DATA/config" ] && ! { : < "$DATA/config"; } 2>/dev/null; then
+  if [ -f "$DATA/config" ] && ! { true < "$DATA/config"; } 2>/dev/null; then
     not_writable
   fi
   [ -d "$DATA" ] || mkdir -p "$DATA" 2>/dev/null || not_writable
@@ -495,7 +496,7 @@ v_status() {
     [ -n "$last" ] || last=none
   fi
   probe=$DATA/.writable.$$
-  if { [ -d "$DATA" ] || mkdir -p "$DATA"; } 2>/dev/null && : 2>/dev/null > "$probe"; then
+  if { [ -d "$DATA" ] || mkdir -p "$DATA"; } 2>/dev/null && true 2>/dev/null > "$probe"; then
     rm -f "$probe"
     writable='writable'
   else

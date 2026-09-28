@@ -439,18 +439,27 @@ t_write_fails_when_data_is_a_file() {
 t_write_fails_in_a_read_only_dir() {
   put "$SB_DATA/config" 'volume=10'
   chmod a-w "$SB_DATA"
-  if : 2>/dev/null > "$SB_DATA/probe"; then
+  # true, not ":": a failed redirection on a special built-in exits dash and bash --posix.
+  if true 2>/dev/null > "$SB_DATA/probe"; then
     rm -f "$SB_DATA/probe"
     chmod u+w "$SB_DATA"
     skip 'the harness can still write to a chmod a-w dir here (root, or Windows, where ctl_test.ps1 tests an icacls deny)'
   fi
   crun volume 40
   rc=$RC
+  err2=$(err)
+  crun status
+  rc3=$RC
+  status=$(out)
   crun test
   rc2=$RC
   chmod u+w "$SB_DATA"
-  assert_eq '1 1' "$rc $rc2" 'exit codes'
-  assert_eq "config not writable (sandbox?) - add $SB_DATA $MSG_TAIL" "$(err)" stderr
+  assert_eq '1 1 0' "$rc $rc2 $rc3" 'exit codes'
+  assert_eq "config not writable (sandbox?) - add $SB_DATA $MSG_TAIL" "$err2" stderr
+  case $status in
+    *"Data dir: $SB_DATA, not writable (sandbox?) - add $SB_DATA $MSG_TAIL."*) ;;
+    *) fail "status in a read-only dir: $status" ;;
+  esac
   assert_content "$SB_DATA/config" 'volume=10'
   assert_eq 'config' "$(ls -A "$SB_DATA")" 'data dir files'
   crun status
