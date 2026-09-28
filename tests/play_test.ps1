@@ -48,6 +48,17 @@ $BaseEnvNames = @(
     'NUMBER_OF_PROCESSORS', 'OS', 'USERNAME', 'USERDOMAIN', 'COMPUTERNAME'
 )
 
+# Windows PowerShell's module analysis cache, which lives in LOCALAPPDATA. A 5.1 child with
+# the sandbox's empty one analyses every module on its module path before its first cmdlet:
+# 29 s on a CI runner with the Az modules. Each sandbox gets a copy of this one. pwsh starts
+# in well under a second without one, so it gets none.
+$ModuleCacheName = 'Microsoft\Windows\PowerShell\ModuleAnalysisCache'
+$ModuleCache = $null
+if ($PSVersionTable.PSEdition -ne 'Core' -and $env:LOCALAPPDATA) {
+    $ModuleCache = Join-Path $env:LOCALAPPDATA $ModuleCacheName
+    if (-not [IO.File]::Exists($ModuleCache)) { $ModuleCache = $null }
+}
+
 # ---- Sandbox
 
 function New-Sandbox {
@@ -69,6 +80,14 @@ function New-Sandbox {
     $s | Add-Member NoteProperty Mutex ('Local\IslamicNotifierTest-' + [Guid]::NewGuid().ToString('N'))
     foreach ($d in $s.Home, $s.Root, $s.Data, $s.Local, $s.AppData, $s.Temp) {
         $null = [IO.Directory]::CreateDirectory($d)
+    }
+    if ($ModuleCache) {
+        # Only speed: a child with no copy is slow, not wrong.
+        try {
+            $cache = Join-Path $s.Local $ModuleCacheName
+            $null = [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($cache))
+            [IO.File]::Copy($ModuleCache, $cache)
+        } catch { }
     }
     $s
 }
@@ -366,7 +385,8 @@ try { $AudioService = [string](Get-Service -Name Audiosrv -ErrorAction Stop).Sta
 [Console]::Out.WriteLine("host: PowerShell $($PSVersionTable.PSVersion) $($PSVersionTable.PSEdition), " +
     "wmp.dll $(if ($HasWmp) { 'yes' } else { 'no' }), audio outputs $AudioOutputs, audio service $AudioService, " +
     "stdin code page $($InputEncoding.CodePage) with a $($InputEncoding.GetPreamble().Length)-byte preamble, " +
-    "now $([Console]::InputEncoding.GetPreamble().Length)")
+    "now $([Console]::InputEncoding.GetPreamble().Length), " +
+    "module cache $(if ($ModuleCache) { "$((Get-Item -LiteralPath $ModuleCache).Length) bytes" } else { 'none' })")
 
 # For a test that needs MediaPlayer to exist.
 function Skip-UnlessMediaPlayer {
