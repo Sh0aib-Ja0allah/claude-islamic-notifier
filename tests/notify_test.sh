@@ -192,6 +192,56 @@ t_data_falls_back_to_home_local_state() {
   [ -d "$SB_HOME/.local/state/islamic-notifier" ] || fail "fallback data dir not created"
 }
 
+# On Windows (Git Bash, MSYS2, Cygwin), with no CLAUDE_PLUGIN_DATA, the data dir is the one
+# play.ps1 uses: %LOCALAPPDATA%\islamic-notifier, converted with cygpath -u.
+t_data_win_uses_localappdata() {
+  SB_ENV_DATA=
+  win
+  printf '%s\n' "$SB/local app data" > "$SB/cfg/cygpath.u"
+  dry 'LOCALAPPDATA=C:\Users\me\AppData\Local'
+  assert_eq "$SB/local app data/islamic-notifier" "$(rget data)" data
+  assert_calls cygpath 'cygpath|-u|C:\Users\me\AppData\Local'
+  put "$SB/local app data/islamic-notifier/force-next" "$(now) subhanallah"
+  hook 'LOCALAPPDATA=C:\Users\me\AppData\Local'
+  assert_calls powershell.exe "$(ps_line -Force subhanallah)"
+  assert_no_file "$SB/local app data/islamic-notifier/force-next"
+  assert_no_file "$SB_STATE/islamic-notifier"
+}
+
+t_data_win_keeps_localappdata_when_cygpath_fails() {
+  SB_ENV_DATA=
+  win
+  dry 'LOCALAPPDATA=C:\Users\me\AppData\Local'
+  assert_eq 'C:\Users\me\AppData\Local/islamic-notifier' "$(rget data)" data
+}
+
+t_data_win_without_localappdata_uses_xdg() {
+  SB_ENV_DATA=
+  win
+  dry
+  assert_eq "$SB_STATE/islamic-notifier" "$(rget data)" data
+  assert_not_called cygpath
+}
+
+t_data_non_win_ignores_localappdata() {
+  SB_ENV_DATA=
+  shim_path cygpath
+  for os in Linux Darwin; do
+    shim_out uname "$os"
+    dry 'LOCALAPPDATA=C:\Users\me\AppData\Local'
+    assert_eq "$SB_STATE/islamic-notifier" "$(rget data)" "data on $os"
+  done
+  assert_not_called cygpath
+}
+
+t_data_plugin_data_wins_on_win() {
+  win
+  dry 'LOCALAPPDATA=C:\Users\me\AppData\Local'
+  assert_eq "$SB_DATA" "$(rget data)" data
+  assert_not_called cygpath
+  assert_calls uname 'uname|-s'
+}
+
 t_root_falls_back_to_script_dir() {
   SB_ENV_ROOT=
   dry
@@ -1429,6 +1479,11 @@ t dryrun_reports_first_skip_and_every_fact
 t debug_log_only_with_debug
 t data_falls_back_to_xdg_state_home
 t data_falls_back_to_home_local_state
+t data_win_uses_localappdata
+t data_win_keeps_localappdata_when_cygpath_fails
+t data_win_without_localappdata_uses_xdg
+t data_non_win_ignores_localappdata
+t data_plugin_data_wins_on_win
 t root_falls_back_to_script_dir
 
 # section 10 bullet 1: OS detection

@@ -111,6 +111,14 @@ if [ -n "${CLAUDE_PLUGIN_DATA:-}" ]; then
   DATA=$CLAUDE_PLUGIN_DATA
 else
   DATA=${XDG_STATE_HOME:-${HOME:-}/.local/state}/islamic-notifier
+  # On Windows, the same dir as play.ps1: %LOCALAPPDATA%\islamic-notifier (section 4.5).
+  if [ -n "${LOCALAPPDATA:-}" ]; then
+    case $(uname -s) in
+      MINGW*|MSYS*|CYGWIN*)
+        la=$(cygpath -u "$LOCALAPPDATA") && [ -n "$la" ] || la=$LOCALAPPDATA
+        DATA=$la/islamic-notifier ;;
+    esac
+  fi
 fi
 # A dry run creates nothing, not even these.
 [ "$DRY" = 1 ] || mkdir -p "$ROOT" "$DATA"
