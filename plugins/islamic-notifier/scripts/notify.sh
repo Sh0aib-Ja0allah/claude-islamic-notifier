@@ -392,6 +392,9 @@ else
     mkdir "$LOCK" || skip busy
   fi
   printf '%s\n' "$$" > "$LOCK/pid"
+  # The trap's own first command assigns owner; shellcheck misses assignments in a trap
+  # string.
+  # shellcheck disable=SC2154
   trap 'owner=; read -r owner < "$LOCK/pid"; [ "$owner" = "$$" ] && rm -rf "$LOCK"' EXIT
   trap 'exit 0' HUP INT TERM
   printf '%s\n' "$NOW" > "$LOCK/ts"
@@ -440,6 +443,8 @@ elif [ "$POOL" -gt 1 ]; then
   i=1
   while [ "$i" -le "$POOL" ]; do
     eval "c=\$CLIP_$i"
+    # The eval above assigns c; shellcheck cannot see into eval.
+    # shellcheck disable=SC2154
     if [ "$c" != "$last" ]; then
       n=$((n + 1))
       eval "PICK_$n=\$c"
@@ -581,7 +586,7 @@ player_run() {
       w=$(wslpath -w "$ps1") && [ -n "$w" ] && ps1=$w
       wclip=$(wslpath -w "$CLIP") && [ -n "$wclip" ] || wclip=$CLIP
       (
-        cd "$SYSROOT/mnt/c"
+        cd "$SYSROOT/mnt/c" || true
         set -- "$PS_EXE" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$ps1" \
           -Worker -Path "$wclip" -Volume "$v"
         [ -z "$TIMEOUT" ] || set -- timeout -k 2 "$MAX_PLAY" "$@"
