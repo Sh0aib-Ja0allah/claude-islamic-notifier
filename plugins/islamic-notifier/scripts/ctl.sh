@@ -118,6 +118,7 @@ MODE=both
 MODE_SRC=default
 read_config() {
   [ -f "$DATA/config" ] || return 0
+  { : < "$DATA/config"; } 2>/dev/null || return 0
   first=1
   while IFS= read -r line || [ -n "$line" ]; do
     if [ "$first" = 1 ]; then
@@ -196,6 +197,11 @@ commit() {
 }
 
 set_key() {
+  # A config that cannot be read is not rewritten: its other lines would be lost. It is
+  # opened, not tested with -r, which Git Bash answers without the Windows ACL.
+  if [ -f "$DATA/config" ] && ! { : < "$DATA/config"; } 2>/dev/null; then
+    not_writable
+  fi
   [ -d "$DATA" ] || mkdir -p "$DATA" 2>/dev/null || not_writable
   tmp=$DATA/.config.$$.tmp
   if ! config_lines "$1" "$2" 2>/dev/null > "$tmp"; then

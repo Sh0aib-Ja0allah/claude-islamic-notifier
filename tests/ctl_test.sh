@@ -414,6 +414,22 @@ t_write_fails_in_a_read_only_dir() {
   esac
 }
 
+# A config that cannot be read is not rewritten, which would lose its other lines.
+t_write_refuses_an_unreadable_config() {
+  put "$SB_DATA/config" 'volume=10' 'foo=bar'
+  chmod a-r "$SB_DATA/config"
+  if cat "$SB_DATA/config" > /dev/null 2>&1; then
+    chmod u+r "$SB_DATA/config"
+    skip 'the harness can still read a chmod a-r file here (root, or Windows, where ctl_test.ps1 tests an icacls deny)'
+  fi
+  crun volume 40
+  chmod u+r "$SB_DATA/config"
+  [ "$RC" = 1 ] || fail "exit $RC"
+  assert_eq "config not writable (sandbox?) - add $SB_DATA $MSG_TAIL" "$(err)" stderr
+  assert_eq 'volume=10
+foo=bar' "$(cat "$SB_DATA/config")" config
+}
+
 t_status_says_when_the_data_dir_is_not_writable() {
   : > "$SB/a file"
   craw --data "$SB/a file" status
@@ -659,6 +675,8 @@ t_windows_paths_in_real_git_bash() {
     *) skip 'not Git Bash, MSYS2 or Cygwin' ;;
   esac
   setup_root
+  # From the sandbox: a path ctl.sh failed to convert would land under the cwd.
+  cd "$SB" || fail "cannot cd to $SB"
   script_w=$(cygpath -w "$SB_ROOT/scripts/ctl.sh")
   script_m=$(cygpath -m "$SB_ROOT/scripts/ctl.sh")
   HOME=$SB_HOME "$TEST_SHELL_PATH" "$script_w" --data "$(cygpath -w "$SB_DATA")" volume 40 \
@@ -693,6 +711,7 @@ t reject_bad_values_and_verbs
 t reject_bad_data
 t write_fails_when_data_is_a_file
 t write_fails_in_a_read_only_dir
+t write_refuses_an_unreadable_config
 t status_says_when_the_data_dir_is_not_writable
 t test_writes_force_next_and_prints_the_dhikr
 t test_without_an_id_is_any_clip
