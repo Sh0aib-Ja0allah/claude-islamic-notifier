@@ -532,61 +532,74 @@ Test 'ps_write_fails_when_data_is_a_file' {
     }
 }
 
-# A data dir this user may not add files to: an icacls deny of write data and append data on
-# the dir alone, removed afterwards. ctl.sh too, since chmod does not make a Windows dir
-# read-only.
-Test 'write_fails_on_an_icacls_deny' {
-    Put (Join-Path $script:S.Data 'config') "volume=10`n"
+# Denials by icacls, each removed afterwards. Each side is its own test and probes the denial
+# its own way first: a process that can still get past it (Git's sh in an elevated session,
+# where Cygwin opens files with backup privileges) skips, with the reason.
+
+# $true if Git's sh, in the sandbox environment, can run SCRIPT with $1 = ARG.
+function Test-ShCan([string]$script, [string]$arg) {
+    $r = Invoke-Proc (New-Info $GitSh ((@('-c', $script, '_', $arg) | ForEach-Object { Format-Arg $_ }) -join ' ') @{} $null)
+    $r.Rc -eq 0
+}
+
+# Invoke-Denied TARGET RIGHTS BODY: BODY with an icacls deny of RIGHTS on TARGET for this user.
+function Invoke-Denied([string]$target, [string]$rights, [scriptblock]$body) {
     $user = [Security.Principal.WindowsIdentity]::GetCurrent().Name
-    $out = & icacls.exe $script:S.Data /deny "${user}:(WD,AD)" 2>&1
+    $out = & icacls.exe $target /deny "${user}:($rights)" 2>&1
     Assert-Eq 0 $LASTEXITCODE "icacls /deny: $out"
     try {
-        $probe = Join-Path $script:S.Data 'probe'
-        $can = $true
-        try { [IO.File]::WriteAllText($probe, '') } catch { $can = $false }
-        if ($can) {
-            [IO.File]::Delete($probe)
-            Skip-Test 'this user can still write to the data dir after an icacls deny'
-        }
-        $shown = $script:S.Data
-        foreach ($side in 'ps', 'sh') {
-            if ($side -eq 'sh' -and -not $GitSh) { continue }
-            foreach ($w in @('volume', '40'), @('test')) {
-                if ($side -eq 'ps') { $r = Invoke-CtlPs $w } else { $r = Invoke-CtlSh $w }
-                Assert-Eq 1 $r.Rc "$side exit code for $w"
-                Assert-Eq "config not writable (sandbox?) - add $shown $MsgTail" $r.Err.Trim() "$side stderr for $w"
-            }
-        }
+        & $body
     } finally {
-        $null = & icacls.exe $script:S.Data /remove:d $user 2>&1
+        $null = & icacls.exe $target /remove:d $user 2>&1
+    }
+}
+
+# A data dir this user may not add files to: a deny of write data and append data on the dir
+# alone. The config and the data dir's files stay as they were.
+function Test-DeniedDir([string]$side) {
+    Put (Join-Path $script:S.Data 'config') "volume=10`n"
+    Invoke-Denied $script:S.Data 'WD,AD' {
+        if ($side -eq 'ps') {
+            $can = $true
+            try { [IO.File]::WriteAllText((Join-Path $script:S.Data 'probe'), '') } catch { $can = $false }
+            if ($can) { Skip-Test 'this user can still add files to the data dir after an icacls deny' }
+        } elseif (Test-ShCan 'true > "$1/probe" && rm -f "$1/probe"' $script:S.Data) {
+            Skip-Test "Git's sh can still add files to the data dir after an icacls deny (an elevated session: Cygwin opens files with backup privileges)"
+        }
+        foreach ($w in @('volume', '40'), @('test')) {
+            if ($side -eq 'ps') { $r = Invoke-CtlPs $w } else { $r = Invoke-CtlSh $w }
+            Assert-Eq 1 $r.Rc "$side exit code for $w"
+            Assert-Eq "config not writable (sandbox?) - add $($script:S.Data) $MsgTail" $r.Err.Trim() "$side stderr for $w"
+        }
     }
     Assert-Eq "volume=10`n" ([IO.File]::ReadAllText((Join-Path $script:S.Data 'config'))) 'config'
     Assert-Eq 'config' (@([IO.Directory]::GetFileSystemEntries($script:S.Data) | ForEach-Object { [IO.Path]::GetFileName($_) }) -join ' ') 'data dir files'
 }
 
-# A config this user may not read (an icacls deny of read data, removed afterwards) is not
-# rewritten, which would lose its other lines.
-Test 'write_refuses_an_unreadable_config' {
+# A config this user may not read (a deny of read data) is not rewritten, which would lose
+# its other lines.
+function Test-UnreadableConfig([string]$side) {
     $cfg = Join-Path $script:S.Data 'config'
     Put $cfg "volume=10`nfoo=bar`n"
-    $user = [Security.Principal.WindowsIdentity]::GetCurrent().Name
-    $out = & icacls.exe $cfg /deny "${user}:(RD)" 2>&1
-    Assert-Eq 0 $LASTEXITCODE "icacls /deny: $out"
-    try {
-        $can = $true
-        try { $null = [IO.File]::ReadAllBytes($cfg) } catch { $can = $false }
-        if ($can) { Skip-Test 'this user can still read the config after an icacls deny' }
-        foreach ($side in 'ps', 'sh') {
-            if ($side -eq 'sh' -and -not $GitSh) { continue }
-            if ($side -eq 'ps') { $r = Invoke-CtlPs 'volume', '40' } else { $r = Invoke-CtlSh 'volume', '40' }
-            Assert-Eq 1 $r.Rc "$side exit code"
-            Assert-Eq "config not writable (sandbox?) - add $($script:S.Data) $MsgTail" $r.Err.Trim() "$side stderr"
+    Invoke-Denied $cfg 'RD' {
+        if ($side -eq 'ps') {
+            $can = $true
+            try { $null = [IO.File]::ReadAllBytes($cfg) } catch { $can = $false }
+            if ($can) { Skip-Test 'this user can still read the config after an icacls deny' }
+        } elseif (Test-ShCan 'true < "$1"' $cfg) {
+            Skip-Test "Git's sh can still read the config after an icacls deny (an elevated session: Cygwin opens files with backup privileges)"
         }
-    } finally {
-        $null = & icacls.exe $cfg /remove:d $user 2>&1
+        if ($side -eq 'ps') { $r = Invoke-CtlPs 'volume', '40' } else { $r = Invoke-CtlSh 'volume', '40' }
+        Assert-Eq 1 $r.Rc "$side exit code"
+        Assert-Eq "config not writable (sandbox?) - add $($script:S.Data) $MsgTail" $r.Err.Trim() "$side stderr"
     }
     Assert-Eq "volume=10`nfoo=bar`n" ([IO.File]::ReadAllText($cfg)) 'config'
 }
+
+Test 'ps_write_fails_on_an_icacls_deny' { Test-DeniedDir 'ps' }
+Test 'sh_write_fails_on_an_icacls_deny' { Assert-Sh; Test-DeniedDir 'sh' }
+Test 'ps_write_refuses_an_unreadable_config' { Test-UnreadableConfig 'ps' }
+Test 'sh_write_refuses_an_unreadable_config' { Assert-Sh; Test-UnreadableConfig 'sh' }
 
 Test 'ps_bom_and_crlf_in_clean_out' {
     & $Messy
