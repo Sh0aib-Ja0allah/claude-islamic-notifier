@@ -39,11 +39,12 @@ lib_init() {
   done
   PASS=0
   FAIL=0
+  SKIP=0
   N=0
 }
 
 # t NAME: run test function t_NAME in a subshell with a fresh sandbox, then delete it. A
-# name with no such function fails.
+# name with no such function fails. A test that calls skip counts as skipped, not passed.
 t() {
   N=$((N + 1))
   TEST=$1
@@ -51,17 +52,27 @@ t() {
   if ! command -v "t_$1" > /dev/null 2>&1; then
     printf 'FAIL %s: no function t_%s\n' "$1" "$1" >&2
     FAIL=$((FAIL + 1))
-  elif ("t_$1"; exit 0); then
-    PASS=$((PASS + 1))
   else
-    FAIL=$((FAIL + 1))
+    ("t_$1"; exit 0)
+    case $? in
+      0) PASS=$((PASS + 1)) ;;
+      77) SKIP=$((SKIP + 1)) ;;
+      *) FAIL=$((FAIL + 1)) ;;
+    esac
   fi
   rm -rf "$RUN_DIR/t$N"
 }
 
 lib_summary() {
-  printf 'pass=%s fail=%s\n' "$PASS" "$FAIL"
+  printf 'pass=%s fail=%s skip=%s\n' "$PASS" "$FAIL" "$SKIP"
   [ "$FAIL" = 0 ]
+}
+
+# skip REASON: end the test as skipped, for a capability this host lacks. The reason is
+# printed; a skip is never a pass.
+skip() {
+  printf 'skip %s: %s\n' "$TEST" "$*"
+  exit 77
 }
 
 new_sandbox() {

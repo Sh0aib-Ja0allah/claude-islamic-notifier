@@ -1,17 +1,20 @@
 #!/bin/sh
 # Tests for plugins/islamic-notifier/scripts/notify.sh (docs/PLAN.md, section 10). POSIX sh,
-# no framework. Prints "pass=N fail=M" and exits non-zero if any test fails; each failure is
-# explained on stderr.
+# no framework. Prints "pass=N fail=M skip=K" and exits non-zero if any test fails; each
+# failure is explained on stderr, and each skip (a tool this host lacks) on stdout.
 #
 # Usage, from the repo root:
 #   sh tests/notify_test.sh
 #   TEST_SHELL=dash dash tests/notify_test.sh    notify.sh runs as "$TEST_SHELL notify.sh"
+# TEST_SHELL names one program; for a shell that needs a flag (bash --posix), name a
+# one-line wrapper that execs it with the flag, by absolute path.
 #
-# No test sleeps, plays audio or starts PowerShell: players, pactl, powershell.exe, cygpath,
-# wslpath, uname and timeout are shims (tests/lib.sh). Ages are epochs written relative to
-# `date +%s`. Tests at a limit (MIN_GAP, STALE_LOCK, FORCE_TTL, the 1 s fast failure) also
-# freeze notify.sh's clock with a date shim, so a slow machine cannot move them across it;
-# the others keep a margin of 20 s or more.
+# No test plays audio or starts PowerShell: players, pactl, powershell.exe, cygpath,
+# wslpath, uname and timeout are shims (tests/lib.sh). Only the host tools tests run the
+# host's own timeout and check what its od prints; the timeout one sleeps 1 s. Ages are
+# epochs written relative to `date +%s`. Tests at a limit (MIN_GAP, STALE_LOCK, FORCE_TTL,
+# the 1 s fast failure) also freeze notify.sh's clock with a date shim, so a slow machine
+# cannot move them across it; the others keep a margin of 20 s or more.
 
 unset CDPATH
 case $0 in
@@ -1459,6 +1462,44 @@ t_state_debug_log_records_the_player() {
   esac
 }
 
+# --- host tools ------------------------------------------------------------------------------
+# Everywhere else, od runs with no check of what it printed and timeout is a shim. These run
+# the host's own, the way notify.sh does, so a host whose tools differ (busybox, BSD) fails
+# here and not in the field.
+
+# The pick reads one 16-bit number from od (B.1 step 14) and keeps its first digits, as
+# notify.sh does. Bytes 1 2 read as 513 on a little-endian host, which every CI runner is.
+t_host_od_reads_two_bytes_as_one_number() {
+  printf '\001\002\003' > "$SB/bytes"
+  r=$(od -An -N2 -tu2 "$SB/bytes")
+  r=${r#"${r%%[0-9]*}"}
+  assert_eq 513 "${r%%[!0-9]*}" "od -An -N2 -tu2 of bytes 1 2 3"
+  r=$(od -An -N2 -tu2 /dev/urandom)
+  r=${r#"${r%%[0-9]*}"}
+  r=${r%%[!0-9]*}
+  case $r in
+    ''|??????*) fail "od -An -N2 -tu2 /dev/urandom gave [$r]" ;;
+  esac
+  [ "$r" -le 65535 ] || fail "od -An -N2 -tu2 /dev/urandom gave $r"
+}
+
+# Players run under timeout -k 2 30 where timeout exists (B.1 step 17). The player's own
+# status must come through, and a stopped player must show as 124, 137 or 143, which never
+# fall through to the next player.
+t_host_timeout_takes_k_and_passes_the_status_through() {
+  command -v timeout > /dev/null 2>&1 ||
+    skip 'no timeout on this host; notify.sh then runs players without it (afplay has -t 30)'
+  timeout -k 2 30 sh -c 'exit 7' < /dev/null
+  rc=$?
+  assert_eq 7 "$rc" "exit status through timeout -k 2 30"
+  timeout -k 1 1 sleep 5 < /dev/null
+  rc=$?
+  case $rc in
+    124|137|143) ;;
+    *) fail "timeout -k 1 1 sleep 5 exited $rc, not 124, 137 or 143" ;;
+  esac
+}
+
 # --- run -------------------------------------------------------------------------------
 
 # harness
@@ -1634,5 +1675,9 @@ t state_written_after_a_play
 t state_not_written_when_skipped
 t state_dry_run_writes_nothing
 t state_debug_log_records_the_player
+
+# host tools
+t host_od_reads_two_bytes_as_one_number
+t host_timeout_takes_k_and_passes_the_status_through
 
 lib_summary
