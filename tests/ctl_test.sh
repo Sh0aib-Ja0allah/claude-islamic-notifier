@@ -110,7 +110,7 @@ ok() {
   [ "$RC" = 0 ] || fail "ctl.sh exited $RC: $(err)"
   [ ! -s "$SB/err" ] || fail "ctl.sh wrote to stderr: $(err)"
   lines=$(awk 'END { print NR }' "$SB/out")
-  [ "$lines" -ge 1 ] && [ "$lines" -le 8 ] || fail "$lines lines of output: $(out)"
+  if [ "$lines" -lt 1 ] || [ "$lines" -gt 8 ]; then fail "$lines lines of output: $(out)"; fi
 }
 
 # ascii: stdout is printable ASCII.
@@ -214,6 +214,48 @@ t_tsv_cells_match_appendix_a() {
   cmp -s "$SB/tsv" "$SB/plan" || fail "TSV rows differ from Appendix A: $(diff "$SB/plan" "$SB/tsv")"
 }
 
+# --- the skills (section 4.6) ---------------------------------------------------------------
+
+# Seven skills, one verb each, with section 4.6's frontmatter and body, by text: the two
+# allowed-tools lines and the body's first line as PLAN.md has them, and both body lines with
+# the skill's own verb. ASCII. CRs are dropped before matching: git has no eol rule for .md,
+# so a Windows checkout (core.autocrlf=true) has CRLF skills.
+t_skills_match_section_4_6() {
+  skills=$PLUGIN/skills
+  assert_eq 'mute pauses sounds status test unmute volume' \
+    "$(cd "$skills" && for d in */; do printf '%s ' "${d%/}"; done | sed 's/ $//')" 'skill dirs'
+  plan=$REPO/docs/PLAN.md
+  bash_rule=$(grep -F -- '  - Bash(sh "${CLAUDE_PLUGIN_ROOT}/scripts/ctl.sh" *)' "$plan")
+  ps_rule=$(grep -F -- '  - PowerShell(& "${CLAUDE_PLUGIN_ROOT}/scripts/ctl.ps1" *)' "$plan")
+  intro=$(grep -F 'Run exactly ONE command with the shell tool you normally use' "$plan")
+  intro=${intro#> }
+  bash_line=$(grep -F -- '- Bash tool: `sh "${CLAUDE_PLUGIN_ROOT}/scripts/ctl.sh"' "$plan")
+  bash_line=${bash_line#> }
+  ps_line=$(grep -F -- '- PowerShell tool: `& "${CLAUDE_PLUGIN_ROOT}/scripts/ctl.ps1"' "$plan")
+  ps_line=${ps_line#> }
+  for l in "$bash_rule" "$ps_rule" "$intro" "$bash_line" "$ps_line"; do
+    [ -n "$l" ] || fail 'section 4.6 lines not found in PLAN.md'
+  done
+  for verb in mute pauses sounds status test unmute volume; do
+    [ -f "$skills/$verb/SKILL.md" ] || fail "no $skills/$verb/SKILL.md"
+    f=$SB/$verb.md
+    tr -d '\r' < "$skills/$verb/SKILL.md" > "$f"
+    if LC_ALL=C awk '/[^ -~]/ { bad = 1 } END { exit !bad }' "$f"; then fail "$verb: not ASCII"; fi
+    assert_eq '---' "$(awk 'NR == 1' "$f")" "$verb: first line"
+    assert_eq 2 "$(grep -c '^---$' "$f")" "$verb: frontmatter fences"
+    grep -q '^description: [^ ]' "$f" || fail "$verb: no description"
+    grep -q '^description: .*: ' "$f" && fail "$verb: a colon in the description"
+    grep -qx 'disable-model-invocation: true' "$f" || fail "$verb: disable-model-invocation"
+    grep -q '^argument-hint: "[^"]*"$' "$f" || fail "$verb: argument-hint not quoted"
+    grep -qx 'allowed-tools:' "$f" || fail "$verb: allowed-tools"
+    grep -qxF -- "$bash_rule" "$f" || fail "$verb: the Bash rule"
+    grep -qxF -- "$ps_rule" "$f" || fail "$verb: the PowerShell rule"
+    grep -qxF -- "$intro" "$f" || fail "$verb: the body's first line"
+    grep -qxF -- "$(printf '%s\n' "$bash_line" | sed "s/<verb>/$verb/")" "$f" || fail "$verb: the Bash line"
+    grep -qxF -- "$(printf '%s\n' "$ps_line" | sed "s/<verb>/$verb/")" "$f" || fail "$verb: the PowerShell line"
+  done
+}
+
 # --- config writes --------------------------------------------------------------------------
 
 t_write_creates_the_data_dir_and_config() {
@@ -273,7 +315,8 @@ t_write_each_verb_sets_its_key() {
     'sounds mode bundled:sounds_mode=bundled' 'sounds mode custom:sounds_mode=custom' \
     'sounds mode both:sounds_mode=both'; do
     rm -f "$SB_DATA/config"
-    # shellcheck disable=SC2086 # the verb and its value are two words
+    # Unquoted on purpose: the verb and its value are two words.
+    # shellcheck disable=SC2086
     crun ${c%%:*}
     ok
     assert_content "$SB_DATA/config" "${c#*:}"
@@ -283,7 +326,8 @@ t_write_each_verb_sets_its_key() {
 t_show_verbs_write_nothing() {
   before=$(snap)
   for v in volume pauses status 'sounds list'; do
-    # shellcheck disable=SC2086 # sounds list is two words
+    # Unquoted on purpose: sounds list is two words.
+    # shellcheck disable=SC2086
     crun $v
     ok
   done
@@ -344,7 +388,8 @@ t_reject_bad_values_and_verbs() {
     'volume 5 6' 'pauses maybe' 'pauses on off' 'sounds mode all' 'sounds mode' 'sounds bogus' \
     'sounds list x' 'sounds open x' 'mute x' 'unmute x' 'status x' 'frob' 'test bogus' \
     'test salawat subhanallah' 'test SALAWAT'; do
-    # shellcheck disable=SC2086 # each case is a verb and its words
+    # Unquoted on purpose: each case is a verb and its words.
+    # shellcheck disable=SC2086
     crun $c
     rejected ''
   done
@@ -361,7 +406,8 @@ t_reject_bad_data() {
   before=$(snap)
   craw --data '' volume 5
   rejected '--data is empty'
-  # shellcheck disable=SC2016 # the ${ is the point: an unsubstituted variable
+  # Single quotes on purpose: the ${ is the point, an unsubstituted variable.
+  # shellcheck disable=SC2016
   craw --data '${CLAUDE_PLUGIN_DATA}' volume 5
   rejected '--data still holds ${: ${CLAUDE_PLUGIN_DATA}'
   craw --data "$SB/x\${y}" volume 5
@@ -380,7 +426,8 @@ t_reject_bad_data() {
 t_write_fails_when_data_is_a_file() {
   : > "$SB/a file"
   for c in 'mute' 'volume 5' 'pauses off' 'sounds mode custom' 'test' 'test salawat'; do
-    # shellcheck disable=SC2086 # a verb and its words
+    # Unquoted on purpose: a verb and its words.
+    # shellcheck disable=SC2086
     craw --data "$SB/a file" $c
     [ "$RC" = 1 ] || fail "exit $RC for $c"
     [ ! -s "$SB/out" ] || fail "stdout for $c: $(out)"
@@ -450,7 +497,7 @@ t_test_writes_force_next_and_prints_the_dhikr() {
   ok
   read -r ts id < "$SB_DATA/force-next"
   assert_eq salawat "$id" 'force-next id'
-  [ "$ts" -ge "$before" ] && [ "$ts" -le "$after" ] || fail "epoch $ts not in $before..$after"
+  if [ "$ts" -lt "$before" ] || [ "$ts" -gt "$after" ]; then fail "epoch $ts not in $before..$after"; fi
   assert_eq "$ts salawat" "$(cat "$SB_DATA/force-next")" 'force-next line'
   [ "$(wc -l < "$SB_DATA/force-next")" -eq 1 ] || fail 'force-next is not one LF line'
   assert_eq "Next: $(tsv_field salawat 2)
@@ -697,6 +744,7 @@ pauses=off' "$(cat "$SB_DATA/config")" config
 t tsv_rows_fields_and_ids
 t tsv_is_utf8_lf_no_bom_final_newline
 t tsv_cells_match_appendix_a
+t skills_match_section_4_6
 t write_creates_the_data_dir_and_config
 t write_replaces_first_drops_later_keeps_others
 t write_appends_a_missing_key
