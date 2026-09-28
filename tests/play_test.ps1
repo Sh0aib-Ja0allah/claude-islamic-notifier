@@ -48,14 +48,19 @@ $BaseEnvNames = @(
     'NUMBER_OF_PROCESSORS', 'OS', 'USERNAME', 'USERDOMAIN', 'COMPUTERNAME'
 )
 
-# Windows PowerShell's module analysis cache, which lives in LOCALAPPDATA. A 5.1 child with
-# the sandbox's empty one analyses every module on its module path before its first cmdlet:
-# 29 s on a CI runner with the Az modules. Each sandbox gets a copy of this one. pwsh starts
-# in well under a second without one, so it gets none.
+# Windows PowerShell's module analysis cache. A 5.1 child with none analyses every module on
+# its module path before its first cmdlet: 29 s on a CI runner with the Az modules. Each
+# sandbox gets a copy of this process's cache where a child looks for it: the local app data
+# folder under USERPROFILE, which is not the LOCALAPPDATA variable (5.1 reads
+# PSModuleAnalysisCachePath, else that folder; AnalysisCacheData.cacheStoreLocation). pwsh
+# starts in well under a second without one, so it gets none.
 $ModuleCacheName = 'Microsoft\Windows\PowerShell\ModuleAnalysisCache'
 $ModuleCache = $null
-if ($PSVersionTable.PSEdition -ne 'Core' -and $env:LOCALAPPDATA) {
-    $ModuleCache = Join-Path $env:LOCALAPPDATA $ModuleCacheName
+if ($PSVersionTable.PSEdition -ne 'Core') {
+    $ModuleCache = $env:PSModuleAnalysisCachePath
+    if (-not $ModuleCache) {
+        $ModuleCache = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) $ModuleCacheName
+    }
     if (-not [IO.File]::Exists($ModuleCache)) { $ModuleCache = $null }
 }
 
@@ -84,7 +89,7 @@ function New-Sandbox {
     if ($ModuleCache) {
         # Only speed: a child with no copy is slow, not wrong.
         try {
-            $cache = Join-Path $s.Local $ModuleCacheName
+            $cache = Join-Path $s.Home "AppData\Local\$ModuleCacheName"
             $null = [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($cache))
             [IO.File]::Copy($ModuleCache, $cache)
         } catch { }
@@ -405,6 +410,29 @@ function Get-NotifyKeys {
     $text = [IO.File]::ReadAllText($Notify)
     $block = [regex]::Match($text, '(?s)\nreport\(\) \{(.*?)\n\}').Groups[1].Value
     @([regex]::Matches($block, '"([a-z_]+)=') | ForEach-Object { $_.Groups[1].Value })
+}
+
+# ---- The harness
+
+# A 5.1 child finds its copy of the module cache where it looks for one, inside the sandbox.
+Test 'harness_children_find_the_module_cache' {
+    if ($PSVersionTable.PSEdition -eq 'Core') {
+        Assert-Eq '' "$ModuleCache" 'module cache copied for pwsh'
+        return
+    }
+    if (-not $ModuleCache) { Skip-Test 'this machine has no Windows PowerShell module cache to copy' }
+    $psi = New-PlayInfo @() @{}
+    $psi.Arguments = '-NoProfile -NonInteractive -Command "' +
+        '[Management.Automation.PSObject].Assembly.GetType(''System.Management.Automation.AnalysisCacheData'').' +
+        'GetField(''cacheStoreLocation'', [Reflection.BindingFlags]''Static,NonPublic'').GetValue($null)"'
+    $p = [Diagnostics.Process]::Start($psi)
+    $p.StandardInput.Close()
+    $err = $p.StandardError.ReadToEndAsync()
+    $where = $p.StandardOutput.ReadToEnd().Trim()
+    $p.WaitForExit()
+    Assert-Eq '' $err.Result 'stderr'
+    Assert-True ($where.StartsWith($S.Dir + '\', [StringComparison]::OrdinalIgnoreCase)) "the child's module cache is not in the sandbox: [$where]"
+    Assert-True ([IO.File]::Exists($where)) "the child's module cache is missing: $where"
 }
 
 Test 'report_keys_match_notify_sh' {
