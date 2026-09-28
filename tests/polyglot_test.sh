@@ -79,26 +79,32 @@ subst() {
 }
 
 # The clock, in milliseconds. Only differences within one run count, so any steady clock
-# will do: GNU date's %N, else /proc/uptime (busybox), else perl (macOS, whose date has no
-# %N), else whole seconds.
-is_ms() {
-  case $1 in
-    [1-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) return 0 ;;
+# will do: GNU date's %3N, else date's %N (busybox has %N but not %3N), else /proc/uptime
+# (10 ms steps), else perl (macOS, whose date has neither), else whole seconds.
+# digits N VALUE: true if VALUE is N digits with no leading zero.
+digits() {
+  case $2 in
+    ''|0*|*[!0-9]*) return 1 ;;
   esac
-  return 1
+  [ ${#2} -eq "$1" ]
 }
-if is_ms "$(date +%s%3N 2>/dev/null)"; then
-  CLOCK=date
+if digits 13 "$(date +%s%3N 2>/dev/null)"; then
+  CLOCK='date-ms'
+elif digits 19 "$(date +%s%N 2>/dev/null)"; then
+  CLOCK='date-ns'
 elif [ -r /proc/uptime ]; then
-  CLOCK=uptime
+  CLOCK='uptime'
 elif command -v perl > /dev/null 2>&1; then
-  CLOCK=perl
+  CLOCK='perl'
 else
-  CLOCK=seconds
+  CLOCK='seconds'
 fi
 ms() {
   case $CLOCK in
-    date) date +%s%3N ;;
+    date-ms) date +%s%3N ;;
+    date-ns)
+      t=$(date +%s%N)
+      printf '%s\n' "${t%??????}" ;;
     uptime) awk '{ printf "%d\n", $1 * 1000 }' /proc/uptime ;;
     perl) perl -MTime::HiRes=time -e 'printf "%d\n", time() * 1000' ;;
     *) printf '%s\n' "$(($(date +%s) * 1000))" ;;
