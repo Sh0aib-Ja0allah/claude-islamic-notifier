@@ -24,7 +24,12 @@
 #
 # Test seams, inert unless set:
 #   ISLAMIC_NOTIFIER_TEST_NOW=<epoch>        the clock, for tests at a time limit
-#   ISLAMIC_NOTIFIER_TEST_HOLD_MS=<ms>       the worker waits this long before its work
+#   ISLAMIC_NOTIFIER_TEST_HOLD_MS=<ms>       the worker waits this long after taking the mutex
+#   ISLAMIC_NOTIFIER_TEST_MUTEX=<name>       the mutex name, so tests never share a real one
+#   ISLAMIC_NOTIFIER_TEST_NO_MEDIAPLAYER=1   MediaPlayer is missing, as without Windows Media
+#                                            Player; =throw: it throws when created, as WPF
+#                                            does for MILAVERR_INVALIDWMPVERSION. Either way
+#                                            tests reach the SoundPlayer fallback.
 
 param(
     [switch]$Hook,
@@ -42,7 +47,10 @@ Set-StrictMode -Off
 
 $MinGap = 2
 $ForceTtl = 120
+$OpenTimeoutMs = 5000
+$MaxPlayMs = 30000
 $MutexName = 'Local\IslamicNotifier'
+if ($env:ISLAMIC_NOTIFIER_TEST_MUTEX) { $MutexName = $env:ISLAMIC_NOTIFIER_TEST_MUTEX }
 
 # ---- Helpers
 
@@ -72,11 +80,20 @@ function Read-FirstLine([string]$file) {
     }
 }
 
+# The hook, its worker and a status call can all log at once, so the file is shared for
+# reading and writing, and a busy file gets a few more tries.
 function Write-Log([string]$msg) {
     if (-not $script:debug) { return }
-    try {
-        [IO.File]::AppendAllText((Join-Path $script:data 'debug.log'), "$(Get-Now) play[$PID] $msg`n")
-    } catch { }
+    $bytes = [Text.Encoding]::UTF8.GetBytes("$(Get-Now) play[$PID] $msg`n")
+    for ($try = 0; $try -lt 5; $try++) {
+        try {
+            $fs = New-Object IO.FileStream((Join-Path $script:data 'debug.log'), 'Append', 'Write', 'ReadWrite')
+            try { $fs.Write($bytes, 0, $bytes.Length) } finally { $fs.Dispose() }
+            return
+        } catch {
+            Start-Sleep -Milliseconds 20
+        }
+    }
 }
 
 # skip REASON: record why nothing plays. The first reason wins, so the report shows it.
@@ -104,7 +121,8 @@ function Initialize-Setup {
     if ($env:CLAUDE_PLUGIN_DATA) {
         $script:data = $env:CLAUDE_PLUGIN_DATA
     } elseif ($DataDir) {
-        $script:data = $DataDir
+        # Absolute, since the worker starts in another directory.
+        $script:data = [IO.Path]::GetFullPath($DataDir)
     } else {
         $local = $env:LOCALAPPDATA
         if (-not $local) { $local = [Environment]::GetFolderPath('LocalApplicationData') }
@@ -317,6 +335,7 @@ function Select-Clip($pool) {
 }
 
 function Test-MediaPlayer {
+    if ($env:ISLAMIC_NOTIFIER_TEST_NO_MEDIAPLAYER -eq '1') { return $false }
     try {
         Add-Type -AssemblyName PresentationCore, WindowsBase
     } catch {
@@ -357,14 +376,19 @@ function Invoke-Report {
     } else {
         $gap = 'ok'
     }
-    # The mutex is only looked at: opening an existing one does not take it.
+    # The mutex is only looked at: opening an existing one does not take it. One an elevated
+    # session created may deny access; it is still held.
     $lock = 'free'
     $m = $null
-    if ([Threading.Mutex]::TryOpenExisting($MutexName, [ref]$m)) {
+    try {
+        if ([Threading.Mutex]::TryOpenExisting($MutexName, [ref]$m)) {
+            $lock = 'busy'
+            $m.Dispose()
+        }
+    } catch {
         $lock = 'busy'
-        $m.Dispose()
-        Set-Skip busy
     }
+    if ($lock -eq 'busy') { Set-Skip busy }
     if (-not $clip) {
         if (Test-GapRecent) {
             $gap = 'recent'
@@ -396,7 +420,10 @@ function Invoke-Report {
     if (-not $script:decision) { $script:decision = 'play' }
     $forceText = 'none'
     if ($script:forced) { $forceText = $script:fid }
-    $ep = @(Get-ExecutionPolicy -List | ForEach-Object { "$($_.Scope):$($_.ExecutionPolicy)" }) -join ','
+    $ep = 'unknown'
+    try {
+        $ep = @(Get-ExecutionPolicy -List | ForEach-Object { "$($_.Scope):$($_.ExecutionPolicy)" }) -join ','
+    } catch { }
     $mp = 'no'
     if ($mediaOk) { $mp = 'yes' }
     @(
@@ -464,7 +491,7 @@ function Start-Worker {
     Clear-HandleInheritance
     $tail = '-Worker'
     if ($script:forced) { $tail += ' -Force ' + $script:fid }
-    if ($DataDir) { $tail += ' -DataDir ' + (ConvertTo-Arg $DataDir) }
+    if ($DataDir) { $tail += ' -DataDir ' + (ConvertTo-Arg $script:data) }
     $psi = New-Object Diagnostics.ProcessStartInfo
     $psi.FileName = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
     $psi.Arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File ' +
@@ -488,12 +515,197 @@ function Invoke-Hook {
     Start-Worker
 }
 
-# ---- -Worker (checkpoint B brings the mutex, the gap, the pick and playback)
+# ---- -Worker: B.2 worker steps 1-6
+
+# Step 1. The mutex is released in the top-level finally, on this same thread.
+function Enter-Mutex {
+    try {
+        $script:mutex = New-Object System.Threading.Mutex($false, $MutexName)
+    } catch [System.UnauthorizedAccessException] {
+        # An elevated session created it and holds it: busy.
+        return $false
+    }
+    try {
+        $script:owned = $script:mutex.WaitOne(0)
+    } catch [System.Threading.AbandonedMutexException] {
+        # Its last owner died holding it; the wait gave it to this process.
+        $script:owned = $true
+    }
+    $script:owned
+}
+
+# A file: URI with each path segment escaped, so a space, '#', '%' or '[' in a name stays
+# part of the name.
+function ConvertTo-FileUri([string]$file) {
+    $parts = [IO.Path]::GetFullPath($file).Split('\')
+    $esc = @($parts[0])
+    for ($i = 1; $i -lt $parts.Count; $i++) { $esc += [Uri]::EscapeDataString($parts[$i]) }
+    New-Object Uri (('file:///' + ($esc -join '/')), [UriKind]::Absolute)
+}
+
+# Step 4. WPF MediaPlayer, pumped on this thread's dispatcher until the clip ends, fails, is
+# not open after 5 s, or reaches the 30 s cap (which counts as played). True if it played.
+# WPF reports some failures as events and others, such as MILAVERR_INVALIDWMPVERSION, by
+# throwing from the constructor, Open or the Volume setter; both mean false, so the
+# fallback runs.
+function Invoke-MediaPlayer([string]$file, [int]$vol) {
+    if (-not (Test-MediaPlayer)) {
+        Write-Log 'media failed: MediaPlayer is not available'
+        return $false
+    }
+    $state = @{ Opened = $false; Ended = $false; Failed = $null }
+    $mp = $null
+    try {
+        if ($env:ISLAMIC_NOTIFIER_TEST_NO_MEDIAPLAYER -eq 'throw') {
+            throw 'MediaPlayer creation failed (test seam)'
+        }
+        $mp = New-Object System.Windows.Media.MediaPlayer
+        # Always set: the default is 0.5.
+        $mp.Volume = $vol / 100
+        $mp.add_MediaOpened({ $state.Opened = $true }.GetNewClosure())
+        $mp.add_MediaEnded({ $state.Ended = $true }.GetNewClosure())
+        $mp.add_MediaFailed({
+                param($sender, $e)
+                $state.Failed = "failed: $($e.ErrorException.Message)"
+            }.GetNewClosure())
+        Write-Log "media open at volume $(Get-Decimal $vol): $file"
+        $mp.Open((ConvertTo-FileUri $file))
+        $mp.Play()
+        $dispatcher = [Windows.Threading.Dispatcher]::CurrentDispatcher
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        $opened = $false
+        while ($true) {
+            $null = $dispatcher.Invoke([Windows.Threading.DispatcherPriority]::Background, [Action] { })
+            if ($state.Opened -and -not $opened) {
+                $opened = $true
+                Write-Log 'media opened'
+            }
+            if ($state.Failed) {
+                Write-Log "media $($state.Failed)"
+                return $false
+            }
+            if ($state.Ended) {
+                Write-Log "media ended after $($sw.ElapsedMilliseconds) ms"
+                return $true
+            }
+            if (-not $opened -and $sw.ElapsedMilliseconds -ge $OpenTimeoutMs) {
+                Write-Log 'media failed: not open after 5 s'
+                return $false
+            }
+            if ($sw.ElapsedMilliseconds -ge $MaxPlayMs) {
+                Write-Log 'media stopped at the 30 s cap'
+                return $true
+            }
+            Start-Sleep -Milliseconds 25
+        }
+    } catch {
+        Write-Log "media failed: $($_.Exception.Message)"
+        return $false
+    } finally {
+        if ($mp) {
+            try {
+                $mp.Stop()
+                $mp.Close()
+            } catch { }
+        }
+    }
+}
+
+# Step 5. SoundPlayer plays WAV only, at full volume. It reads a stream, so no name is ever
+# parsed as a URL.
+function Invoke-SoundPlayer([string]$wav) {
+    $stream = $null
+    try {
+        $stream = [IO.File]::OpenRead($wav)
+        $sp = New-Object System.Media.SoundPlayer
+        $sp.Stream = $stream
+        $sp.PlaySync()
+        $sp.Dispose()
+        Write-Log "soundplayer played: $wav"
+        return $true
+    } catch {
+        Write-Log "soundplayer failed: $($_.Exception.Message)"
+        return $false
+    } finally {
+        if ($stream) { $stream.Dispose() }
+    }
+}
+
+# Steps 3 to 5 for one clip. True if it played.
+function Invoke-Clip([string]$clip) {
+    if (-not [IO.File]::Exists($clip)) {
+        Write-Log "failed: no such file: $clip"
+        return $false
+    }
+    $file = $clip
+    # Step 3. A clip on a share (a WSL path, \\wsl$\...) plays from a local copy.
+    if ($clip.StartsWith('\\', [StringComparison]::Ordinal)) {
+        $script:tempCopy = Join-Path ([IO.Path]::GetTempPath()) ("islamic-notifier-$PID" + [IO.Path]::GetExtension($clip))
+        [IO.File]::Copy($clip, $script:tempCopy, $true)
+        Write-Log "copied to $($script:tempCopy)"
+        $file = $script:tempCopy
+    }
+    if (Invoke-MediaPlayer $file $script:vol) { return $true }
+    # SoundPlayer never runs at volume 0: it cannot play quieter than full.
+    if ($script:vol -le 0) {
+        Write-Log 'failed: no fallback at volume 0'
+        return $false
+    }
+    if ($file -match '\.wav\z') {
+        $wav = $file
+    } else {
+        $wav = Get-WavFor $clip
+    }
+    if (-not $wav) {
+        Write-Log 'failed: no WAV for the fallback'
+        return $false
+    }
+    Invoke-SoundPlayer $wav
+}
 
 function Invoke-Worker {
+    if ($Force) {
+        $script:forced = $true
+        $script:fid = Get-ForceId $Force
+    }
+    if (-not (Enter-Mutex)) {
+        Write-Log 'busy: another clip is playing'
+        $script:rc = 3
+        return
+    }
     $hold = $env:ISLAMIC_NOTIFIER_TEST_HOLD_MS
     if ($hold -cmatch '^[0-9]{1,6}\z') { Start-Sleep -Milliseconds ([int]$hold) }
-    Write-Log 'worker done'
+    $start = Get-Now
+    # Step 2. -Path comes from WSL, where notify.sh already kept the gap and picked.
+    if ($script:clipPath) {
+        $clip = $script:clipPath
+    } else {
+        if (Test-GapRecent) {
+            Set-Skip gap
+            return
+        }
+        $clip = Select-Clip (Get-Pool)
+        if (-not $clip) {
+            Set-Skip no-clip
+            return
+        }
+    }
+    Write-Log "clip $clip"
+    $script:chosen = $true
+    if (-not (Invoke-Clip $clip)) {
+        $script:rc = 4
+        return
+    }
+    # The same state files as notify.sh (docs/PLAN.md, section 4.5); last-play is when this
+    # play started. The WSL caller keeps its own.
+    if (-not $script:clipPath) {
+        try {
+            [IO.File]::WriteAllText((Join-Path $script:data 'last-play'), "$start`n")
+            [IO.File]::WriteAllText((Join-Path $script:data 'last-file'), "$clip`n")
+        } catch {
+            Write-Log "state not written: $($_.Exception.Message)"
+        }
+    }
 }
 
 # ---- Main
@@ -508,6 +720,10 @@ $script:forceLocal = '0'
 $script:forced = $false
 $script:inputState = 'none'
 $script:clipPath = $null
+$script:mutex = $null
+$script:owned = $false
+$script:chosen = $false
+$script:tempCopy = $null
 try {
     $script:dry = [bool]$DryRun -or $env:ISLAMIC_NOTIFIER_DRY_RUN -eq '1'
     $script:debug = -not $script:dry -and $env:ISLAMIC_NOTIFIER_DEBUG -eq '1'
@@ -523,5 +739,17 @@ try {
     }
 } catch {
     Write-Log "error: $($_.Exception.Message)"
+    # An error after a clip was chosen means that clip failed.
+    if ($script:chosen) { $script:rc = 4 }
+} finally {
+    if ($script:owned) {
+        try { $script:mutex.ReleaseMutex() } catch { }
+    }
+    if ($script:mutex) {
+        try { $script:mutex.Dispose() } catch { }
+    }
+    if ($script:tempCopy) {
+        try { [IO.File]::Delete($script:tempCopy) } catch { }
+    }
 }
 exit $script:rc

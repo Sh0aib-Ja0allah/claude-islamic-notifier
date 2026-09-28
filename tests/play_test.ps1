@@ -48,6 +48,8 @@ function New-Sandbox {
     }
     $s | Add-Member NoteProperty Bundled (Join-Path $s.Root 'sounds')
     $s | Add-Member NoteProperty Custom (Join-Path $s.Home '.claude\islamic-notifier\sounds')
+    # A mutex of its own, so no test shares Local\IslamicNotifier with a real session.
+    $s | Add-Member NoteProperty Mutex ('Local\IslamicNotifierTest-' + [Guid]::NewGuid().ToString('N'))
     foreach ($d in $s.Home, $s.Root, $s.Data, $s.Local, $s.AppData, $s.Temp) {
         $null = [IO.Directory]::CreateDirectory($d)
     }
@@ -56,9 +58,11 @@ function New-Sandbox {
 
 # Wait for every worker the sandbox's debug.log names, so the sandbox can go.
 function Wait-Workers {
-    foreach ($id in (Get-WorkerPids)) {
-        try { $null = (Get-Process -Id $id -ErrorAction Stop).WaitForExit(20000) } catch { }
-    }
+    try {
+        foreach ($id in (Get-WorkerPids)) {
+            try { $null = (Get-Process -Id $id -ErrorAction Stop).WaitForExit(20000) } catch { }
+        }
+    } catch { }
 }
 
 function Remove-Sandbox {
@@ -125,6 +129,7 @@ function New-PlayInfo([string[]]$Arguments, [hashtable]$Env) {
     $ev['CLAUDE_PLUGIN_DATA'] = $script:S.Data
     $ev['CLAUDE_PLUGIN_ROOT'] = $script:S.Root
     $ev['ISLAMIC_NOTIFIER_DEBUG'] = '1'
+    $ev['ISLAMIC_NOTIFIER_TEST_MUTEX'] = $script:S.Mutex
     if ($Env) {
         foreach ($k in $Env.Keys) {
             if ($null -eq $Env[$k]) { $ev.Remove($k) } else { $ev[$k] = [string]$Env[$k] }
@@ -189,10 +194,24 @@ function ConvertFrom-Report([string]$text) {
 
 # ---- State of the sandbox
 
-function Get-Log {
-    $f = Join-Path $script:S.Data 'debug.log'
-    if (-not [IO.File]::Exists($f)) { return @() }
-    @([IO.File]::ReadAllLines($f))
+# Get-Log [DIR]: the lines of debug.log, read while workers may still append to it.
+function Get-Log([string]$dir = $script:S.Data) {
+    $f = Join-Path $dir 'debug.log'
+    for ($try = 0; $try -lt 10; $try++) {
+        if (-not [IO.File]::Exists($f)) { return @() }
+        try {
+            $fs = New-Object IO.FileStream($f, 'Open', 'Read', 'ReadWrite')
+            try {
+                $text = (New-Object IO.StreamReader($fs)).ReadToEnd()
+            } finally {
+                $fs.Dispose()
+            }
+            return @($text -split "`n" | Where-Object { $_ -ne '' })
+        } catch {
+            Start-Sleep -Milliseconds 50
+        }
+    }
+    throw "debug.log could not be read"
 }
 
 function Get-WorkerStarts { @(Get-Log | Where-Object { $_ -match 'worker started, pid ' }) }
@@ -245,6 +264,47 @@ function Assert-NoWorker {
     Assert-Eq 0 (Get-WorkerStarts).Count 'workers started'
 }
 
+# ---- Clips and the worker
+
+# New-Wav FILE [SAMPLES]: a 16-bit mono 44.1 kHz WAV of silence, with no samples by default.
+function New-Wav([string]$file, [int]$samples = 0) {
+    $null = [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($file))
+    $n = $samples * 2
+    $ms = New-Object IO.MemoryStream
+    $w = New-Object IO.BinaryWriter($ms)
+    $ascii = [Text.Encoding]::ASCII
+    $w.Write($ascii.GetBytes('RIFF')); $w.Write([int](36 + $n)); $w.Write($ascii.GetBytes('WAVE'))
+    $w.Write($ascii.GetBytes('fmt ')); $w.Write([int]16); $w.Write([int16]1); $w.Write([int16]1)
+    $w.Write([int]44100); $w.Write([int]88200); $w.Write([int16]2); $w.Write([int16]16)
+    $w.Write($ascii.GetBytes('data')); $w.Write([int]$n); $w.Write((New-Object byte[] $n))
+    $w.Flush()
+    [IO.File]::WriteAllBytes($file, $ms.ToArray())
+}
+
+# Worker [ARGS] [ENV]: play.ps1 -Worker, which must print nothing; its exit code is in .Rc.
+function Worker {
+    param([string[]]$Extra = @(), [hashtable]$Env = @{})
+    $r = Invoke-Play -Arguments (@('-Worker') + $Extra) -Env $Env
+    Assert-Eq '' $r.Out 'worker stdout'
+    Assert-Eq '' $r.Err 'worker stderr'
+    $r
+}
+
+# The clips the workers chose, in order.
+function Get-Played {
+    @(Get-Log | ForEach-Object { if ($_ -match ' play\[\d+\] clip (.*)\z') { $Matches[1] } })
+}
+
+function Get-LogMatch([string]$pattern) {
+    @(Get-Log | Where-Object { $_ -match $pattern })
+}
+
+function Read-Data([string]$name) {
+    $f = Join-Path $S.Data $name
+    if (-not [IO.File]::Exists($f)) { return $null }
+    [IO.File]::ReadAllText($f).TrimEnd("`n")
+}
+
 # ---- Report
 
 # The report's keys, as notify.sh's report() prints them, in order.
@@ -257,7 +317,13 @@ function Get-NotifyKeys {
 Test 'report_keys_match_notify_sh' {
     $keys = Get-NotifyKeys
     Assert-Eq 20 $keys.Count 'keys found in notify.sh'
-    $rep = Dry
+    $r = Invoke-Play -Arguments '-DryRun'
+    Assert-Eq '0 ' "$($r.Rc) $($r.Err)" 'exit code and stderr'
+    # Exactly one key=value line per fact, nothing else.
+    $lines = @($r.Out -split "`r?`n" | Where-Object { $_ -ne '' })
+    Assert-Eq 22 $lines.Count 'report lines'
+    foreach ($l in $lines) { Assert-True ($l -cmatch '^[a-z_]+=') "not a key=value line: $l" }
+    $rep = ConvertFrom-Report $r.Out
     Assert-Eq (($keys + 'execution_policy', 'media_player') -join ' ') (@($rep.Keys) -join ' ') 'report keys'
     Assert-Eq '1 win none' "$($rep.report) $($rep.os) $($rep.input)" 'report os input'
 }
@@ -281,15 +347,29 @@ Test 'report_values' {
     Assert-True ($rep.media_player -ceq 'yes' -or $rep.media_player -ceq 'no') "media_player: $($rep.media_player)"
     if ($rep.media_player -eq 'yes') {
         Assert-Eq 'MediaPlayer none 0.70' "$($rep.player) $($rep.fallback) $($rep.player_volume)" 'player'
+        # With a WAV to fall back on, and another volume.
+        Put (Join-Path $S.Data 'config') 'volume=5'
+        New-Wav (Join-Path $S.Bundled 'subhanallah.wav')
+        $rep = Dry
+        Assert-Eq 'MediaPlayer SoundPlayer 0.05 play' "$($rep.player) $($rep.fallback) $($rep.player_volume) $($rep.decision)" 'player with a WAV'
     }
 }
 
 Test 'report_dry_run_env_var_starts_nothing' {
-    $r = Invoke-Play -Arguments '-Hook' -Env @{ ISLAMIC_NOTIFIER_DRY_RUN = '1' } -Stdin (Get-Fixture 'stop-idle.json')
-    Assert-Eq 0 $r.Rc 'exit code'
-    $rep = ConvertFrom-Report $r.Out
+    $psi = New-PlayInfo @('-Hook') @{ ISLAMIC_NOTIFIER_DRY_RUN = '1' }
+    $p = [Diagnostics.Process]::Start($psi)
+    $hookPid = $p.Id
+    $p.StandardInput.Write((Get-Fixture 'stop-idle.json'))
+    $p.StandardInput.Close()
+    $out = $p.StandardOutput.ReadToEnd()
+    $p.WaitForExit()
+    Assert-Eq 0 $p.ExitCode 'exit code'
+    $rep = ConvertFrom-Report $out
     Assert-Eq 'idle skip-no-clip' "$($rep.input) $($rep.decision)" 'input decision'
     Assert-Eq '' (Get-DataFiles) 'data dir files'
+    # A worker would outlive the hook with the hook as its parent.
+    $kids = @(Get-CimInstance Win32_Process -Filter "ParentProcessId = $hookPid")
+    Assert-Eq 0 $kids.Count 'processes the dry run started'
 }
 
 Test 'report_changes_no_file' {
@@ -350,7 +430,9 @@ Test 'config_env_beats_config_beats_defaults' {
     Assert-OneWorker '-Worker'
     Put (Join-Path $S.Data 'config') 'muted=0'
     Assert-Eq 1 (Dry -Env @{ ISLAMIC_NOTIFIER_MUTE = '1' }).muted 'env 1 over config 0'
-    Assert-Eq 0 (Dry -Env @{ ISLAMIC_NOTIFIER_MUTE = 'yes' }).muted 'env not 0 or 1'
+    Assert-Eq 0 (Dry -Env @{ ISLAMIC_NOTIFIER_MUTE = 'yes' }).muted 'env not 0 or 1, config 0'
+    Put (Join-Path $S.Data 'config') 'muted=1'
+    Assert-Eq 1 (Dry -Env @{ ISLAMIC_NOTIFIER_MUTE = 'yes' }).muted 'env not 0 or 1, config 1'
 }
 
 # ---- force-next
@@ -471,6 +553,13 @@ Test 'pauses_malformed_json_falls_back_to_the_text_check' {
     Assert-Eq idle $rep.input 'an object, not an array'
 }
 
+# Inputs where the JSON check and the text check disagree: valid JSON is read as JSON.
+Test 'pauses_valid_json_is_parsed_not_matched' {
+    Assert-Eq paused (Dry -Extra '-Hook' -Stdin '{"background_tasks":[1]}').input 'a non-object entry'
+    Assert-Eq idle (Dry -Extra '-Hook' -Stdin '{"meta":{"background_tasks":[{"id":"a"}]}}').input 'a nested key'
+    Assert-Eq paused (Dry -Extra '-Hook' -Stdin '{"session_crons":[{"id":"c"}],"background_tasks":[]}').input 'crons only'
+}
+
 # ---- Remote
 
 $RemoteCases = @(
@@ -511,7 +600,7 @@ Test 'remote_values_other_than_true_do_not_skip' {
 Test 'hook_starts_one_worker_and_returns' {
     $r = Hook
     Assert-OneWorker '-Worker'
-    Assert-True (Get-Log | Where-Object { $_ -match 'worker done' }) 'the worker did not run'
+    Assert-True (Get-Log | Where-Object { $_ -match 'skip no-clip' }) 'the worker did not run'
     Assert-True ($r.Ms -lt 15000) "hook took $($r.Ms) ms"
 }
 
@@ -545,6 +634,313 @@ Test 'hook_pipes_close_before_the_worker_ends' {
     $end = $sw.ElapsedMilliseconds
     Assert-True ($eof + 2000 -lt $end) "pipes closed at $eof ms, worker ended at $end ms"
     [Console]::Error.WriteLine("  (handles: hook pipes closed at $eof ms; worker ended at $end ms)")
+}
+
+# ---- The worker
+
+Test 'worker_held_mutex_exits_3' {
+    Put (Join-Path $S.Data 'config') 'volume=0'
+    New-Wav (Join-Path $S.Bundled 'a.wav')
+    $m = New-Object Threading.Mutex($false, $S.Mutex)
+    Assert-True ($m.WaitOne(0)) 'the test could not take the mutex'
+    try {
+        Assert-Eq 3 (Worker).Rc 'exit code with the mutex held'
+        $rep = Dry -Extra '-Force', '*'
+        Assert-Eq 'busy skip-busy' "$($rep.lock) $($rep.decision)" 'lock decision'
+    } finally {
+        $m.ReleaseMutex()
+        $m.Dispose()
+    }
+    Assert-Eq 0 (Get-Played).Count 'clips played while busy'
+    Assert-Eq 0 (Worker).Rc 'exit code once free'
+    Assert-Eq 1 (Get-Played).Count 'clips played once free'
+}
+
+# Without the test seam, the mutex is the real Local\IslamicNotifier. Held for a moment only.
+Test 'worker_mutex_name_is_local_islamicnotifier' {
+    $m = New-Object Threading.Mutex($false, 'Local\IslamicNotifier')
+    $got = $m.WaitOne(0)
+    try {
+        Assert-True $got 'Local\IslamicNotifier is held by another process (a real session?)'
+        $rep = Dry -Env @{ ISLAMIC_NOTIFIER_TEST_MUTEX = $null } -Extra '-Force', '*'
+        Assert-Eq busy $rep.lock 'lock'
+    } finally {
+        if ($got) { $m.ReleaseMutex() }
+        $m.Dispose()
+    }
+}
+
+# A worker that died holding the mutex leaves it abandoned; the next one takes it (B.2 step 1).
+Test 'worker_abandoned_mutex_counts_as_taken' {
+    Put (Join-Path $S.Data 'config') 'volume=0'
+    New-Wav (Join-Path $S.Bundled 'a.wav')
+    # A handle of our own keeps the mutex alive after its owner exits.
+    $keep = New-Object Threading.Mutex($false, $S.Mutex)
+    try {
+        $psi = New-Object Diagnostics.ProcessStartInfo
+        $psi.FileName = $Exe
+        $psi.Arguments = "-NoProfile -NonInteractive -Command `"`$m = New-Object Threading.Mutex(`$false, '$($S.Mutex)'); if (`$m.WaitOne(0)) { exit 0 }; exit 1`""
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $true
+        $p = [Diagnostics.Process]::Start($psi)
+        $p.WaitForExit()
+        Assert-Eq 0 $p.ExitCode 'the owner could not take the mutex'
+        Assert-Eq 0 (Worker).Rc 'exit code'
+        Assert-Eq 1 (Get-Played).Count 'clips played'
+    } finally {
+        $keep.Dispose()
+    }
+}
+
+Test 'worker_missing_file_exits_4' {
+    $r = Worker -Extra '-Path', (Join-Path $S.Dir 'no such clip.wav'), '-Volume', '0'
+    Assert-Eq 4 $r.Rc 'exit code'
+    Assert-Eq 1 (Get-LogMatch 'failed: no such file').Count 'log'
+    Assert-Eq 'debug.log' (Get-DataFiles) 'data dir files'
+}
+
+Test 'worker_gap' {
+    $t = Now
+    $env = @{ ISLAMIC_NOTIFIER_TEST_NOW = "$t" }
+    Put (Join-Path $S.Data 'config') 'volume=0'
+    New-Wav (Join-Path $S.Bundled 'a.wav')
+    foreach ($age in 0, 1) {
+        Put (Join-Path $S.Data 'last-play') "$($t - $age)"
+        Assert-Eq 0 (Worker -Extra '-Force', '*' -Env $env).Rc "exit code, last play $age s ago"
+    }
+    Assert-Eq 0 (Get-Played).Count 'clips played inside the gap'
+    $rep = Dry -Env $env -Extra '-Force', '*'
+    Assert-Eq 'recent skip-gap' "$($rep.gap) $($rep.decision)" 'gap decision'
+    foreach ($age in 2, 3) {
+        Put (Join-Path $S.Data 'last-play') "$($t - $age)"
+        Assert-Eq 0 (Worker -Extra '-Force', '*' -Env $env).Rc "exit code, last play $age s ago"
+    }
+    Assert-Eq 2 (Get-Played).Count 'clips played at 2 and 3 s'
+    Assert-Eq "$t" (Read-Data 'last-play') 'last-play'
+}
+
+Test 'worker_empty_pool_exits_0' {
+    Put (Join-Path $S.Data 'config') 'volume=0'
+    Assert-Eq 0 (Worker).Rc 'exit code'
+    Assert-Eq 1 (Get-LogMatch 'skip no-clip').Count 'log'
+    Assert-Eq 'config debug.log' (Get-DataFiles) 'data dir files'
+}
+
+Test 'worker_pool_modes' {
+    Put (Join-Path $S.Data 'config') 'volume=0'
+    $b = Join-Path $S.Bundled 'subhanallah.wav'
+    $c = Join-Path $S.Custom 'alhamdulillah.wav'
+    New-Wav $b
+    New-Wav $c
+    Assert-Eq 2 (Dry).pool 'pool, both'
+    Put (Join-Path $S.Data 'last-file') $b
+    Assert-Eq 0 (Worker).Rc 'exit code'
+    Remove-Item -LiteralPath (Join-Path $S.Data 'last-play')
+    Assert-Eq 0 (Worker).Rc 'exit code'
+    Assert-Eq "$c|$b" ((Get-Played) -join '|') 'clips, both'
+    foreach ($m in @(@('bundled', $b), @('custom', $c))) {
+        Put (Join-Path $S.Data 'config') 'volume=0', "sounds_mode=$($m[0])"
+        $rep = Dry
+        Assert-Eq "1 $($m[1])" "$($rep.pool) $($rep.clip)" "pool clip, $($m[0])"
+        Remove-Item -LiteralPath (Join-Path $S.Data 'last-play')
+        Assert-Eq 0 (Worker).Rc 'exit code'
+        Assert-Eq $m[1] (Get-Played)[-1] "clip, $($m[0])"
+    }
+}
+
+Test 'worker_never_repeats_the_last_clip' {
+    Put (Join-Path $S.Data 'config') 'volume=0'
+    # Not $s: PowerShell names ignore case, and $S is the sandbox.
+    $alh = Join-Path $S.Bundled 'alhamdulillah.wav'
+    $sub = Join-Path $S.Bundled 'subhanallah.wav'
+    New-Wav $alh
+    New-Wav $sub
+    Put (Join-Path $S.Data 'last-file') $sub
+    for ($i = 0; $i -lt 4; $i++) {
+        $lp = Join-Path $S.Data 'last-play'
+        if ([IO.File]::Exists($lp)) { Remove-Item -LiteralPath $lp }
+        Assert-Eq 0 (Worker).Rc 'exit code'
+    }
+    Assert-Eq "$alh|$sub|$alh|$sub" ((Get-Played) -join '|') 'clips in play order'
+}
+
+Test 'worker_variants_and_the_forced_id' {
+    Put (Join-Path $S.Data 'config') 'volume=0'
+    foreach ($n in 'subhanallah.female.wav', 'subhanallah2.wav', 'alhamdulillah.wav') {
+        New-Wav (Join-Path $S.Bundled $n)
+    }
+    $rep = Dry -Extra '-Force', 'subhanallah'
+    Assert-Eq "1 $(Join-Path $S.Bundled 'subhanallah.female.wav')" "$($rep.pool) $($rep.clip)" 'pool clip'
+    Assert-Eq 0 (Worker -Extra '-Force', 'subhanallah').Rc 'exit code'
+    Assert-Eq (Join-Path $S.Bundled 'subhanallah.female.wav') ((Get-Played) -join '|') 'clip'
+    Assert-Eq 0 (Dry -Extra '-Force', 'la-hawla').pool 'pool for an id with no clip'
+}
+
+Test 'worker_extensions_in_any_case' {
+    Put (Join-Path $S.Data 'config') 'volume=0'
+    foreach ($n in 'A.WAV', 'b.Mp3', 'c.ogg', 'd.wav.txt', 'wav', '.hidden.wav') {
+        New-Wav (Join-Path $S.Custom $n)
+    }
+    $null = [IO.Directory]::CreateDirectory((Join-Path $S.Custom 'dir.wav'))
+    Assert-Eq 2 (Dry).pool 'pool'
+    Put (Join-Path $S.Data 'last-file') (Join-Path $S.Custom 'A.WAV')
+    $null = Worker
+    Assert-Eq (Join-Path $S.Custom 'b.Mp3') ((Get-Played) -join '|') 'clip'
+}
+
+Test 'worker_name_with_a_space_hash_percent_and_brackets_plays' {
+    Put (Join-Path $S.Data 'config') 'volume=0'
+    $f = Join-Path $S.Custom 'a b#c%d [1].wav'
+    New-Wav $f
+    Assert-Eq 0 (Worker).Rc 'exit code'
+    Assert-Eq 1 (Get-LogMatch 'media ended').Count 'media ended'
+    Assert-Eq $f (Read-Data 'last-file') 'last-file'
+}
+
+Test 'worker_arabic_name_plays' {
+    Put (Join-Path $S.Data 'config') 'volume=0'
+    $f = Join-Path $S.Custom ((-join [char[]](0x0633, 0x0628, 0x062D, 0x0627, 0x0646)) + '.wav')
+    New-Wav $f
+    Assert-Eq 0 (Worker).Rc 'exit code'
+    Assert-Eq 1 (Get-LogMatch 'media ended').Count 'media ended'
+    Assert-Eq $f (Read-Data 'last-file') 'last-file'
+}
+
+Test 'worker_silent_real_play_ends_and_writes_state' {
+    Put (Join-Path $S.Data 'config') 'volume=0'
+    $f = Join-Path $S.Bundled 'subhanallah.wav'
+    New-Wav $f 44100
+    $before = Now
+    $r = Worker
+    $after = Now
+    Assert-Eq 0 $r.Rc 'exit code'
+    $opened = @(Get-LogMatch 'media opened')
+    $ended = @(Get-LogMatch 'media ended after (\d+) ms')
+    Assert-Eq '1 1' "$($opened.Count) $($ended.Count)" 'media opened, media ended'
+    Assert-Eq 1 (Get-LogMatch 'media open at volume 0.00').Count 'volume'
+    $null = $ended[0] -match 'after (\d+) ms'
+    Assert-True ([int]$Matches[1] -ge 900) "a 1 s clip ended after $($Matches[1]) ms"
+    $lp = [long](Read-Data 'last-play')
+    Assert-True ($lp -ge $before -and $lp -le $after) "last-play $lp is not between $before and $after"
+    Assert-Eq $f (Read-Data 'last-file') 'last-file'
+}
+
+Test 'worker_mediaplayer_that_throws_falls_back_to_soundplayer' {
+    $env = @{ ISLAMIC_NOTIFIER_TEST_NO_MEDIAPLAYER = 'throw' }
+    Put (Join-Path $S.Data 'config') 'volume=50'
+    $f = Join-Path $S.Bundled 'subhanallah.wav'
+    New-Wav $f
+    Assert-Eq 0 (Worker -Env $env).Rc 'exit code'
+    Assert-Eq 1 (Get-LogMatch 'media failed: MediaPlayer creation failed').Count 'media failed'
+    Assert-Eq 1 (Get-LogMatch 'soundplayer played').Count 'soundplayer played'
+    Assert-Eq $f (Read-Data 'last-file') 'last-file'
+}
+
+Test 'worker_soundplayer_fallback' {
+    $env = @{ ISLAMIC_NOTIFIER_TEST_NO_MEDIAPLAYER = '1' }
+    Put (Join-Path $S.Data 'config') 'volume=50'
+    $f = Join-Path $S.Bundled 'subhanallah.wav'
+    New-Wav $f
+    $rep = Dry -Env $env
+    Assert-Eq 'SoundPlayer none none no play' "$($rep.player) $($rep.fallback) $($rep.player_volume) $($rep.media_player) $($rep.decision)" 'report'
+    Assert-Eq 0 (Worker -Env $env).Rc 'exit code'
+    Assert-Eq 1 (Get-LogMatch 'media failed').Count 'media failed'
+    Assert-Eq 1 (Get-LogMatch 'soundplayer played').Count 'soundplayer played'
+    Assert-Eq $f (Read-Data 'last-file') 'last-file'
+}
+
+Test 'worker_soundplayer_uses_a_wav_beside_the_clip' {
+    $env = @{ ISLAMIC_NOTIFIER_TEST_NO_MEDIAPLAYER = '1' }
+    Put (Join-Path $S.Data 'config') 'volume=50'
+    $mp3 = Join-Path $S.Custom 'la-hawla.mp3'
+    $wav = Join-Path $S.Custom 'la-hawla.wav'
+    Put $mp3 'not audio'
+    $rep = Dry -Env $env
+    Assert-Eq 'none skip-no-player' "$($rep.player) $($rep.decision)" 'report without a WAV'
+    Assert-Eq 4 (Worker -Env $env).Rc 'exit code without a WAV'
+    # With the WAV in the pool too, last-file makes the pick the MP3.
+    New-Wav $wav
+    Put (Join-Path $S.Data 'last-file') $wav
+    Assert-Eq 0 (Worker -Env $env).Rc 'exit code with a WAV beside'
+    Assert-Eq $mp3 ((Get-Played)[-1]) 'clip'
+    Assert-Eq 1 (Get-LogMatch ([regex]::Escape("soundplayer played: $wav"))).Count 'played the WAV'
+    Assert-Eq $mp3 (Read-Data 'last-file') 'last-file'
+}
+
+Test 'worker_no_soundplayer_at_volume_0' {
+    $env = @{ ISLAMIC_NOTIFIER_TEST_NO_MEDIAPLAYER = '1' }
+    Put (Join-Path $S.Data 'config') 'volume=0'
+    New-Wav (Join-Path $S.Bundled 'subhanallah.wav')
+    Assert-Eq 'none skip-no-player' "$((Dry -Env $env -Extra '-Force', '*').player) $((Dry -Env $env -Extra '-Force', '*').decision)" 'report'
+    Assert-Eq 4 (Worker -Extra '-Force', '*' -Env $env).Rc 'exit code'
+    Assert-Eq 0 (Get-LogMatch 'soundplayer').Count 'soundplayer ran'
+    Assert-Eq 1 (Get-LogMatch 'no fallback at volume 0').Count 'log'
+    Assert-Eq 'config debug.log' (Get-DataFiles) 'data dir files'
+}
+
+Test 'worker_path_skips_the_gap_the_pick_and_the_state' {
+    $t = Now
+    # 1 s ago: inside the gap, and not what a play now would write.
+    Put (Join-Path $S.Data 'last-play') "$($t - 1)"
+    New-Wav (Join-Path $S.Bundled 'other.wav')
+    $f = Join-Path $S.Dir 'from wsl.wav'
+    New-Wav $f
+    $r = Worker -Extra '-Path', $f, '-Volume', '20' -Env @{ ISLAMIC_NOTIFIER_TEST_NOW = "$t" }
+    Assert-Eq 0 $r.Rc 'exit code'
+    Assert-Eq $f ((Get-Played) -join '|') 'clip'
+    Assert-Eq 1 (Get-LogMatch 'media open at volume 0.20').Count 'volume'
+    Assert-Eq "$($t - 1)" (Read-Data 'last-play') 'last-play'
+    Assert-Eq $null (Read-Data 'last-file') 'last-file'
+}
+
+# A relative -DataDir names the same dir for the hook and for its worker, which starts in TEMP.
+Test 'worker_relative_data_dir_is_the_hooks' {
+    $rel = Join-Path $S.Dir 'rel data'
+    $r = Invoke-Play -Arguments '-Hook', '-DataDir', 'rel data' -Env @{ CLAUDE_PLUGIN_DATA = $null } -Stdin (Get-Fixture 'stop-idle.json')
+    Assert-Quiet $r
+    $start = @(Get-Log $rel | Where-Object { $_ -match 'worker started, pid (\d+)' })
+    Assert-Eq 1 $start.Count 'workers started'
+    $null = $start[0] -match 'worker started, pid (\d+)'
+    try { $null = (Get-Process -Id ([int]$Matches[1]) -ErrorAction Stop).WaitForExit(20000) } catch { }
+    Assert-Eq 1 @(Get-Log $rel | Where-Object { $_ -match 'skip no-clip' }).Count 'the worker logged in the same dir'
+    Assert-Eq 0 @([IO.Directory]::GetFiles($S.Temp)).Count 'files in TEMP'
+}
+
+Test 'worker_unc_clip_is_played_from_a_temp_copy' {
+    $f = Join-Path $S.Dir 'on a share.wav'
+    New-Wav $f
+    $unc = '\\?\' + $f
+    Assert-Eq 0 (Worker -Extra '-Path', $unc, '-Volume', '0').Rc 'exit code'
+    Assert-Eq 1 (Get-LogMatch ([regex]::Escape("copied to $($S.Temp)"))).Count 'copied to TEMP'
+    Assert-Eq 1 (Get-LogMatch 'media ended').Count 'media ended'
+    Assert-Eq 0 @([IO.Directory]::GetFiles($S.Temp)).Count 'files left in TEMP'
+}
+
+# The same pipe test as above, with a real, silent forced play instead of the hold seam.
+Test 'hook_pipes_close_before_a_forced_silent_worker_ends' {
+    Put (Join-Path $S.Data 'config') 'volume=0'
+    Put (Join-Path $S.Data 'force-next') "$(Now) *"
+    $f = Join-Path $S.Bundled 'subhanallah.wav'
+    New-Wav $f (3 * 44100)
+    $psi = New-PlayInfo @('-Hook') @{}
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    $p = [Diagnostics.Process]::Start($psi)
+    $p.StandardInput.Write((Get-Fixture 'stop-idle.json'))
+    $p.StandardInput.Close()
+    $err = $p.StandardError.ReadToEndAsync()
+    $null = $p.StandardOutput.ReadToEnd()
+    $null = $err.Result
+    $eof = $sw.ElapsedMilliseconds
+    $ids = @(Get-WorkerPids)
+    Assert-Eq 1 $ids.Count 'workers started'
+    $w = $null
+    try { $w = Get-Process -Id $ids[0] -ErrorAction Stop } catch { }
+    Assert-True ($w -and -not $w.HasExited) "the worker had ended when the hook's pipes closed ($eof ms)"
+    $null = $w.WaitForExit(30000)
+    $end = $sw.ElapsedMilliseconds
+    Assert-Eq $f (Read-Data 'last-file') 'last-file'
+    Assert-Eq 1 (Get-LogMatch 'media ended').Count 'media ended'
+    [Console]::Error.WriteLine("  (handles, real play: hook pipes closed at $eof ms; worker ended at $end ms)")
 }
 
 [Console]::Out.WriteLine("pass=$($script:Pass) fail=$($script:Fail)")
