@@ -31,6 +31,15 @@ $script:Skip = 0
 $script:SkipReason = $null
 $script:S = $null
 
+# A child reads its stdin as Claude Code writes it: UTF-8 with no BOM. .NET Framework's
+# Process writes the preamble of [Console]::InputEncoding into every child's stdin, so on a
+# UTF-8 console (code page 65001, as on GitHub's Windows runners) each child would read a
+# BOM before its input. Same code page, no preamble. pwsh never writes one.
+$InputEncoding = [Console]::InputEncoding
+if ($InputEncoding.CodePage -eq 65001 -and $InputEncoding.GetPreamble().Length -gt 0) {
+    [Console]::InputEncoding = New-Object Text.UTF8Encoding $false
+}
+
 # The only host variables a child sees; everything else is the sandbox's.
 $BaseEnvNames = @(
     'SystemRoot', 'SystemDrive', 'windir', 'ComSpec', 'PATHEXT', 'Path', 'ProgramFiles',
@@ -355,7 +364,9 @@ if (-not $script:NoPlayback -and $AudioOutputs -eq 0) {
 $AudioService = 'missing'
 try { $AudioService = [string](Get-Service -Name Audiosrv -ErrorAction Stop).Status } catch { }
 [Console]::Out.WriteLine("host: PowerShell $($PSVersionTable.PSVersion) $($PSVersionTable.PSEdition), " +
-    "wmp.dll $(if ($HasWmp) { 'yes' } else { 'no' }), audio outputs $AudioOutputs, audio service $AudioService")
+    "wmp.dll $(if ($HasWmp) { 'yes' } else { 'no' }), audio outputs $AudioOutputs, audio service $AudioService, " +
+    "stdin code page $($InputEncoding.CodePage) with a $($InputEncoding.GetPreamble().Length)-byte preamble, " +
+    "now $([Console]::InputEncoding.GetPreamble().Length)")
 
 # For a test that needs MediaPlayer to exist.
 function Skip-UnlessMediaPlayer {
