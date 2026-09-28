@@ -12,7 +12,8 @@
 # It always exits 0. Outside --dry-run it writes nothing to stdout or stderr.
 #
 # Dry-run report: one key=value line per fact, always all of them, in this order. play.ps1
-# -DryRun (M3) and ctl status (M4) print the same keys. Values are ASCII words and numbers,
+# -DryRun prints the same keys; ctl status reads them and prints plain-English lines
+# (docs/PLAN.md, Appendix B.3). Values are ASCII words and numbers,
 # except the paths in root, data and clip, which are printed as they are on disk. "-" means
 # the fact is not checked on this path: on win, play.ps1 owns the gap, lock, pool and player.
 #   report=1                  version of this key list
