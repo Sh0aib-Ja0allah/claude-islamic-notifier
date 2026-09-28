@@ -79,8 +79,9 @@ subst() {
 }
 
 # The clock, in milliseconds. Only differences within one run count, so any steady clock
-# will do: GNU date's %3N, else date's %N (busybox has %N but not %3N), else /proc/uptime
-# (10 ms steps), else perl (macOS, whose date has neither), else whole seconds.
+# will do: GNU date's %3N, else date's %N (some busybox builds have %N but not %3N), else
+# /proc/uptime, else perl (macOS, whose date has neither), else whole seconds. STEP is the
+# clock's resolution in ms, printed with it: a run shown as 0 ms took less than one step.
 # digits N VALUE: true if VALUE is N digits with no leading zero.
 digits() {
   case $2 in
@@ -88,16 +89,19 @@ digits() {
   esac
   [ ${#2} -eq "$1" ]
 }
+STEP=1
 if digits 13 "$(date +%s%3N 2>/dev/null)"; then
   CLOCK='date-ms'
 elif digits 19 "$(date +%s%N 2>/dev/null)"; then
   CLOCK='date-ns'
 elif [ -r /proc/uptime ]; then
   CLOCK='uptime'
+  STEP=10
 elif command -v perl > /dev/null 2>&1; then
   CLOCK='perl'
 else
   CLOCK='seconds'
+  STEP=1000
 fi
 ms() {
   case $CLOCK in
@@ -131,7 +135,8 @@ else
   ROOT_W=$ROOT
   LOG_W=$LOG
 fi
-printf 'clock=%s windows=%s require=[%s]\n' "$CLOCK" "${WINDOWS:-0}" "${POLYGLOT_REQUIRE:-}"
+printf 'clock=%s step=%sms windows=%s require=[%s]\n' "$CLOCK" "$STEP" "${WINDOWS:-0}" \
+  "${POLYGLOT_REQUIRE:-}"
 
 # The stubs. Each writes <branch>.args, <branch>.stdin, then <branch>.done. notify.sh
 # first waits 2 s, so a hook that waits for it (not backgrounded, or holding the output
