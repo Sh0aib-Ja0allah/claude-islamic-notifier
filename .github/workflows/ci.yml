@@ -1,0 +1,147 @@
+# CI (docs/PLAN.md, section 10): the polyglot parse matrix, the notify.sh and play.ps1
+# suites, shellcheck and a CRLF check, on real runners. A shell a job must exercise can not
+# pass by being absent: POLYGLOT_REQUIRE fails a required polyglot leg that did not run, and
+# the notify suite fails on a TEST_SHELL that is not a program. Each step after the CRLF
+# check runs even if an earlier one failed, so one run shows every failure.
+name: ci
+
+on:
+  push:
+    branches: [main, 'ci/**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: linux (sh, dash, bash --posix)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - name: Versions
+        run: |
+          uname -a
+          ls -l /bin/sh
+          bash --version | head -n 1
+          dpkg-query -W dash
+      - name: CRLF check
+        run: sh tests/crlf_check.sh
+      - name: shellcheck -s sh, every .sh
+        if: ${{ !cancelled() }}
+        run: |
+          command -v shellcheck > /dev/null || { sudo apt-get update && sudo apt-get install -y shellcheck; }
+          shellcheck --version
+          git ls-files -z '*.sh' | xargs -0 shellcheck -s sh -f gcc
+      - name: notify suite, sh
+        if: ${{ !cancelled() }}
+        run: sh tests/notify_test.sh
+      - name: notify suite, dash
+        if: ${{ !cancelled() }}
+        run: TEST_SHELL=dash dash tests/notify_test.sh
+      - name: notify suite, bash --posix
+        if: ${{ !cancelled() }}
+        run: |
+          printf '#!/bin/sh\nexec %s --posix "$@"\n' "$(command -v bash)" > "$RUNNER_TEMP/bash-posix"
+          chmod +x "$RUNNER_TEMP/bash-posix"
+          cat "$RUNNER_TEMP/bash-posix"
+          TEST_SHELL="$RUNNER_TEMP/bash-posix" bash --posix tests/notify_test.sh
+      - name: polyglot, sh dash bash-posix
+        if: ${{ !cancelled() }}
+        env:
+          POLYGLOT_REQUIRE: sh dash bash-posix
+        run: sh tests/polyglot_test.sh
+
+  alpine:
+    name: alpine (busybox ash)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      IMAGE: alpine:3
+    steps:
+      - uses: actions/checkout@v5
+      - name: CRLF check
+        run: sh tests/crlf_check.sh
+      - name: Versions
+        if: ${{ !cancelled() }}
+        run: docker run --rm "$IMAGE" sh -c 'cat /etc/alpine-release; busybox | head -n 1; ls -l /bin/sh'
+      - name: notify suite, busybox ash
+        if: ${{ !cancelled() }}
+        env:
+          SCRIPT: |
+            printf '#!/bin/sh\nexec /bin/busybox ash "$@"\n' > /tmp/busybox-ash
+            chmod +x /tmp/busybox-ash
+            cat /tmp/busybox-ash
+            TEST_SHELL=/tmp/busybox-ash /bin/busybox ash tests/notify_test.sh
+        run: docker run --rm --init -v "$GITHUB_WORKSPACE:/w" -w /w "$IMAGE" sh -c "$SCRIPT"
+      - name: polyglot, sh busybox-ash
+        if: ${{ !cancelled() }}
+        run: >-
+          docker run --rm --init -e GITHUB_ACTIONS -e POLYGLOT_REQUIRE='sh busybox-ash'
+          -v "$GITHUB_WORKSPACE:/w" -w /w "$IMAGE" sh tests/polyglot_test.sh
+
+  macos:
+    name: macos (/bin/sh)
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - name: Versions
+        run: |
+          sw_vers
+          ls -l /bin/sh
+          /bin/sh --version | head -n 1
+      - name: CRLF check
+        run: sh tests/crlf_check.sh
+      - name: notify suite, /bin/sh
+        if: ${{ !cancelled() }}
+        run: TEST_SHELL=/bin/sh /bin/sh tests/notify_test.sh
+      - name: polyglot, sh
+        if: ${{ !cancelled() }}
+        env:
+          POLYGLOT_REQUIRE: sh
+        run: /bin/sh tests/polyglot_test.sh
+
+  windows:
+    name: windows (Git Bash, powershell.exe, pwsh)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+      - name: Versions
+        run: |
+          uname -a
+          sh --version | head -n 1
+          command -v dash || echo 'dash is not installed'
+          powershell.exe -NoProfile -Command '$PSVersionTable.PSVersion.ToString()'
+          pwsh -NoProfile -Command '$PSVersionTable.PSVersion.ToString()'
+          git config --show-origin --get-all core.autocrlf || true
+      - name: CRLF check
+        run: sh tests/crlf_check.sh
+      - name: notify suite, Git Bash sh
+        if: ${{ !cancelled() }}
+        run: sh tests/notify_test.sh
+      - name: notify suite, dash if present
+        if: ${{ !cancelled() }}
+        run: |
+          if command -v dash > /dev/null; then
+            TEST_SHELL=dash dash tests/notify_test.sh
+          else
+            echo 'dash is not installed; not required on Windows'
+          fi
+      - name: play.ps1 suite, powershell.exe
+        if: ${{ !cancelled() }}
+        run: powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tests/play_test.ps1
+      - name: play.ps1 suite, pwsh
+        if: ${{ !cancelled() }}
+        run: pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tests/play_test.ps1
+      - name: polyglot, sh bash powershell.exe pwsh
+        if: ${{ !cancelled() }}
+        env:
+          POLYGLOT_REQUIRE: sh bash powershell.exe pwsh
+        run: sh tests/polyglot_test.sh
