@@ -92,7 +92,7 @@ done
 [ -n "$HAVE_DATA" ] || usage '--data is required'
 [ -n "$DATA_ARG" ] || usage "--data is empty: \${CLAUDE_PLUGIN_DATA} was not substituted"
 case $DATA_ARG in
-  *'${'*) usage "--data still holds \${: $DATA_ARG" ;;
+  *"\${"*) usage "--data still holds \${: $DATA_ARG" ;;
 esac
 [ $# -gt 0 ] || usage 'no verb'
 VERB=$1
@@ -263,7 +263,7 @@ rget() {
 # scan DIR: N and NAMES (", "-joined) for its clips; IGN_N and IGN for the files the player
 # skips (an unsupported extension); LONG_N and LONG for WAVs over 20 s by their header.
 scan() {
-  N=0 NAMES= IGN_N=0 IGN= LONG_N=0 LONG=
+  N=0 NAMES='' IGN_N=0 IGN='' LONG_N=0 LONG=''
   [ -d "$1" ] || return 0
   for f in "$1"/*; do
     [ -f "$f" ] || continue

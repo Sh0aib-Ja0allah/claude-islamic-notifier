@@ -225,13 +225,13 @@ t_skills_match_section_4_6() {
   assert_eq 'mute pauses sounds status test unmute volume' \
     "$(cd "$skills" && for d in */; do printf '%s ' "${d%/}"; done | sed 's/ $//')" 'skill dirs'
   plan=$REPO/docs/PLAN.md
-  bash_rule=$(grep -F -- '  - Bash(sh "${CLAUDE_PLUGIN_ROOT}/scripts/ctl.sh" *)' "$plan")
-  ps_rule=$(grep -F -- '  - PowerShell(& "${CLAUDE_PLUGIN_ROOT}/scripts/ctl.ps1" *)' "$plan")
+  bash_rule=$(grep -F -- "  - Bash(sh \"\${CLAUDE_PLUGIN_ROOT}/scripts/ctl.sh\" *)" "$plan")
+  ps_rule=$(grep -F -- "  - PowerShell(& \"\${CLAUDE_PLUGIN_ROOT}/scripts/ctl.ps1\" *)" "$plan")
   intro=$(grep -F 'Run exactly ONE command with the shell tool you normally use' "$plan")
   intro=${intro#> }
-  bash_line=$(grep -F -- '- Bash tool: `sh "${CLAUDE_PLUGIN_ROOT}/scripts/ctl.sh"' "$plan")
+  bash_line=$(grep -F -- "- Bash tool: \`sh \"\${CLAUDE_PLUGIN_ROOT}/scripts/ctl.sh\"" "$plan")
   bash_line=${bash_line#> }
-  ps_line=$(grep -F -- '- PowerShell tool: `& "${CLAUDE_PLUGIN_ROOT}/scripts/ctl.ps1"' "$plan")
+  ps_line=$(grep -F -- "- PowerShell tool: \`& \"\${CLAUDE_PLUGIN_ROOT}/scripts/ctl.ps1\"" "$plan")
   ps_line=${ps_line#> }
   for l in "$bash_rule" "$ps_rule" "$intro" "$bash_line" "$ps_line"; do
     [ -n "$l" ] || fail 'section 4.6 lines not found in PLAN.md'
@@ -406,12 +406,10 @@ t_reject_bad_data() {
   before=$(snap)
   craw --data '' volume 5
   rejected '--data is empty'
-  # Single quotes on purpose: the ${ is the point, an unsubstituted variable.
-  # shellcheck disable=SC2016
-  craw --data '${CLAUDE_PLUGIN_DATA}' volume 5
-  rejected '--data still holds ${: ${CLAUDE_PLUGIN_DATA}'
+  craw --data "\${CLAUDE_PLUGIN_DATA}" volume 5
+  rejected "--data still holds \${: \${CLAUDE_PLUGIN_DATA}"
   craw --data "$SB/x\${y}" volume 5
-  rejected '--data still holds ${'
+  rejected "--data still holds \${"
   craw volume 5
   rejected '--data is required'
   craw --data
@@ -447,12 +445,12 @@ t_write_fails_in_a_read_only_dir() {
   fi
   crun volume 40
   rc=$RC
+  crun test
+  rc2=$RC
   err2=$(err)
   crun status
   rc3=$RC
   status=$(out)
-  crun test
-  rc2=$RC
   chmod u+w "$SB_DATA"
   assert_eq '1 1 0' "$rc $rc2 $rc3" 'exit codes'
   assert_eq "config not writable (sandbox?) - add $SB_DATA $MSG_TAIL" "$err2" stderr
